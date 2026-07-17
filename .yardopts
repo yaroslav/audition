@@ -1,0 +1,11 @@
+--readme README.md
+--markup markdown
+--title "Audition"
+--output-dir doc/api
+--no-private
+--embed-mixins
+lib/**/*.rb
+-
+docs/design.md
+CHANGELOG.md
+LICENSE.txt

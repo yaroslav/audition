@@ -6,18 +6,19 @@ RSpec.describe Audition::BundleSweep do
   it "audits every locked gem and ranks the results" do
     Dir.mktmpdir do |dir|
       lock = File.join(dir, "Gemfile.lock")
+      # rspec is always installed here: it is running this spec.
       File.write(lock, <<~LOCK)
         GEM
           remote: https://rubygems.org/
           specs:
-            multi_json (1.15.0)
+            rspec (3.13.2)
             no-such-gem-xyz (1.0.0)
 
         PLATFORMS
           ruby
 
         DEPENDENCIES
-          multi_json
+          rspec
           no-such-gem-xyz
       LOCK
 
@@ -26,12 +27,12 @@ RSpec.describe Audition::BundleSweep do
       ).rows
 
       expect(rows.map(&:name))
-        .to contain_exactly("multi_json", "no-such-gem-xyz")
+        .to contain_exactly("rspec", "no-such-gem-xyz")
 
-      multi_json = rows.find { |r| r.name == "multi_json" }
-      expect(multi_json.verdict).to eq(:not_ready)
-      expect(multi_json.errors).to be_positive
-      expect(multi_json.status).to eq("ok")
+      rspec_row = rows.find { |r| r.name == "rspec" }
+      expect(rspec_row.verdict).to eq(:not_ready)
+      expect(rspec_row.errors).to be_positive
+      expect(rspec_row.status).to eq("ok")
 
       missing = rows.find { |r| r.name == "no-such-gem-xyz" }
       expect(missing.status).to eq("not installed")

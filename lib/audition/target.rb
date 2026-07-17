@@ -12,8 +12,26 @@ module Audition
       vendor node_modules tmp log coverage pkg .git .bundle
     ].freeze
 
-    attr_reader :type, :root, :ruby_files, :entry
+    # @return [Symbol] one of `:script`, `:gem`, `:rack`, `:rails`,
+    #   `:directory`, `:bundle`
+    attr_reader :type
 
+    # @return [String] the target's root directory
+    attr_reader :root
+
+    # @return [Array<String>] Ruby files to scan statically
+    attr_reader :ruby_files
+
+    # @return [Hash, nil] dynamic probe entry (`:mode` plus
+    #   mode-specific keys), nil for static-only targets
+    attr_reader :entry
+
+    # Detects what `raw` points at and builds the target.
+    #
+    # @param raw [String] a `.rb`/`.ru` file, a directory, a
+    #   `Gemfile.lock`, or an installed gem name
+    # @return [Target]
+    # @raise [Audition::Error] when nothing matches
     def self.detect(raw)
       raw = normalize(raw)
       if File.file?(raw)

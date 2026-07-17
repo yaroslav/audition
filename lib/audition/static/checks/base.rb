@@ -33,6 +33,10 @@ module Audition
           # non-main Ractors (parallel scanning), so class-level
           # state is written eagerly on the main Ractor at class
           # definition time and kept deeply shareable.
+          #
+          # @param value [String, nil] sets the identifier when
+          #   given; otherwise derived from the class name
+          # @return [String] kebab-case check identifier
           def check_name(value = nil)
             @check_name = -value if value # audition:disable class-level-state
             @check_name || name.split("::").last
@@ -43,6 +47,15 @@ module Audition
             @explanations || EMPTY_CATALOG
           end
 
+          # Registers a message catalog entry. Strings may contain
+          # `%{placeholders}` filled by {#flag}.
+          #
+          # @param key [Symbol] catalog key used by {#flag}
+          # @param severity [Symbol] `:error`, `:warning`, `:info`
+          # @param message [String] one-line problem statement
+          # @param why [String] the Ractor rule behind it
+          # @param fix [String] suggested remediation
+          # @return [void]
           def explain(key, severity:, message:, why:, fix:)
             entry = {
               severity: severity, message: message,
@@ -72,6 +85,15 @@ module Audition
             end
           )
 
+          # Generates visit methods for the given Prism node types.
+          # The handler runs via instance_exec and traversal always
+          # continues into child nodes afterwards. Handlers must not
+          # capture outer locals (they are isolated for cross-Ractor
+          # use and Ractor.make_shareable would raise).
+          #
+          # @param node_types [Array<Symbol>] e.g. `:call_node`
+          # @yieldparam node [Prism::Node] the visited node
+          # @return [void]
           def on(*node_types, &handler)
             isolated = Ractor.make_shareable(handler)
             node_types.each do |type|
@@ -83,6 +105,10 @@ module Audition
             end
           end
 
+          # Runs this check over one parsed file.
+          #
+          # @param file [SourceFile]
+          # @return [Array<Finding>]
           def call(file)
             visitor = new(file)
             visitor.visit(file.root)

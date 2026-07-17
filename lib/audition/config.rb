@@ -25,6 +25,9 @@ module Audition
 
     attr_reader :fail_on, :timeout, :exclude, :disabled_checks
 
+    # @param root [String] directory that may contain .audition.yml
+    # @return [Config] empty config when the file is absent
+    # @raise [Audition::Error] on malformed YAML
     def self.load(root)
       path = File.join(root.to_s, FILE)
       return new(**EMPTY) unless File.file?(path)

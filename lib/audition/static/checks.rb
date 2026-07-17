@@ -18,15 +18,22 @@ module Audition
       # Expression-level checks, run per file. Class variables and
       # class-level instance variable state are covered semantically
       # by the rubydex graph audit, not by per-file visitors.
+      #
+      # @return [Array<Class>] built-in plus registered checks
       def self.all
         BUILT_IN + registered
       end
 
-      # Extension point: gems can subclass Base and register here.
+      # Extension point: gems can subclass {Base} and register here.
+      #
+      # @param check [Class] a {Base} subclass
+      # @return [void]
       def self.register(check)
         registered << check
       end
 
+      # @param check [Class] a previously registered check
+      # @return [void]
       def self.deregister(check)
         registered.delete(check)
       end

@@ -6,6 +6,17 @@ require "rbconfig"
 
 module Audition
   module Dynamic
+    # Outcome of one dynamic probe.
+    #
+    # @!attribute [r] mode
+    #   @return [Symbol] `:script`, `:require`, `:rack`, `:rails`,
+    #     or `:capabilities`
+    # @!attribute [r] raw
+    #   @return [Hash] the harness's parsed JSON, verbatim
+    # @!attribute [r] findings
+    #   @return [Array<Finding>] findings derived from `raw`
+    # @!attribute [r] passed
+    #   @return [Boolean] whether the target's own surface passed
     Result = Data.define(:mode, :raw, :findings, :passed)
 
     # Spawns the harness subprocess per probe mode, parses its JSON,
@@ -17,11 +28,19 @@ module Audition
         "Observed on the live object graph after loading the " \
         "target; this is ground truth, not a static guess."
 
+      # @param ruby [String] Ruby executable for the harness
+      # @param timeout [Integer] seconds before a probe subprocess
+      #   is killed
       def initialize(ruby: RbConfig.ruby, timeout: 30)
         @ruby = ruby
         @timeout = timeout
       end
 
+      # Runs the probe described by a {Target#entry} hash.
+      #
+      # @param entry [Hash] `:mode` plus mode-specific keys
+      # @return [Result]
+      # @raise [Audition::Error] on an unknown mode
       def probe(entry)
         case (entry[:mode] || entry["mode"]).to_sym
         when :script then probe_script(entry)

@@ -9,6 +9,13 @@ module Audition
             "(a .rb script, directory, config.ru dir, Rails root, " \
             "gem dir, or installed gem name)"
 
+    # Entry point used by `exe/audition`.
+    #
+    # @param argv [Array<String>] command line arguments
+    # @param stdout [IO]
+    # @param stderr [IO]
+    # @return [Integer] exit code: 0 clean, 1 findings at or above
+    #   the `--fail-on` threshold, 2 usage error
     def self.run(argv, stdout: $stdout, stderr: $stderr)
       new(stdout: stdout, stderr: stderr).run(argv)
     end

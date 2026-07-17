@@ -30,6 +30,8 @@ module Audition
         "Ractor.store_if_absent for lazy initialization, or keep " \
         "per-Ractor state in Ractor.current[:key]."
 
+      # @param sources [Hash{String => String}] path => source
+      # @return [Array<Finding>]
       def analyze_sources(sources)
         graph = Rubydex::Graph.new
         sources.each do |path, code|
@@ -41,6 +43,9 @@ module Audition
 
       # rubydex's index_all descends directories but skips bare file
       # lists, so files are fed through index_source individually.
+      #
+      # @param paths [Array<String>] files to index and audit
+      # @return [Array<Finding>]
       def analyze_paths(paths)
         sources = {}
         paths.each do |path|

@@ -7,6 +7,9 @@ pattern-matching your source: it also loads the target in a
 sandboxed subprocess and observes real `Ractor::IsolationError`s on
 the live object graph.
 
+[![GitHub Release](https://img.shields.io/github/v/release/yaroslav/audition)](https://github.com/yaroslav/audition/releases)
+[![Docs](https://img.shields.io/badge/yard-docs-blue.svg)](https://rubydoc.info/gems/audition)
+
 - **Three probes, one verdict.** Per-file Prism AST checks,
   whole-program semantic analysis on the
   [rubydex](https://github.com/Shopify/rubydex) graph (class-level

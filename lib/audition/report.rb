@@ -80,6 +80,12 @@ module Audition
     attr_reader :target_type, :target_root, :findings,
       :dynamic_results, :unsafe_fixes, :baselined
 
+    # @param target_type [Symbol] see {Target#type}
+    # @param target_root [String]
+    # @param findings [Array<Finding>] static plus dynamic findings
+    # @param dynamic_results [Array<Dynamic::Result>]
+    # @param unsafe_fixes [Integer] shown as the `--fix-unsafe` hint
+    # @param baselined [Integer] findings hidden by the baseline
     def initialize(target_type:, target_root:, findings:,
       dynamic_results: [], unsafe_fixes: 0,
       baselined: 0)
@@ -97,6 +103,9 @@ module Audition
     # errors (or a failed probe with clean own findings) mean the
     # target is fine but cannot run here yet; anything softer is
     # merely risky.
+    #
+    # @return [Symbol] `:not_ready`, `:blocked`, `:risky`, or
+    #   `:ready`
     def verdict
       return :not_ready if own_errors?
       return :blocked if dependency_errors? ||
@@ -130,6 +139,8 @@ module Audition
       end
     end
 
+    # @param style [Style] rendering style (auto-detected default)
+    # @return [String] the human-facing terminal report
     def to_text(style: Style.detect)
       Text.new(self, style).render
     end
@@ -140,6 +151,9 @@ module Audition
 
     # GitHub Actions workflow commands: findings become inline PR
     # annotations when this runs in CI.
+    #
+    # @return [String] one `::error`/`::warning`/`::notice` line
+    #   per finding plus a verdict line
     def to_github
       lines = findings.map do |f|
         level = GITHUB_LEVELS.fetch(f.severity)

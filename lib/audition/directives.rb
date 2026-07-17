@@ -16,6 +16,8 @@ module Audition
       @by_path = {}
     end
 
+    # @param findings [Array<Finding>]
+    # @return [Array<Finding>] findings not silenced by a pragma
     def filter(findings)
       findings.reject { |finding| disabled?(finding) }
     end

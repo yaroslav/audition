@@ -176,18 +176,18 @@ RSpec.describe Audition::CLI do
         GEM
           remote: https://rubygems.org/
           specs:
-            multi_json (1.15.0)
+            rspec (3.13.2)
 
         PLATFORMS
           ruby
 
         DEPENDENCIES
-          multi_json
+          rspec
       LOCK
 
       status, out, = run(lock, "--static-only")
 
-      expect(out).to include("multi_json")
+      expect(out).to include("rspec")
       expect(out).to include("not ready")
       expect(status).to eq(1)
     end

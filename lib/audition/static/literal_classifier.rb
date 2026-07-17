@@ -20,10 +20,14 @@ module Audition
       ].freeze
       SHAREABLE_FACTORIES = %w[Struct Class Module].freeze
 
+      # @param frozen_string_literal [Boolean] whether the file has
+      #   the frozen_string_literal magic comment
       def initialize(frozen_string_literal:)
         @frozen_string_literal = frozen_string_literal
       end
 
+      # @param node [Prism::Node] an expression node
+      # @return [Symbol] classification, see class docs
       def classify(node)
         case node
         when Prism::IntegerNode, Prism::FloatNode,

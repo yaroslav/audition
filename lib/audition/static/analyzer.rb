@@ -4,15 +4,23 @@ require "etc"
 
 module Audition
   module Static
+    # Runs the per-file Prism checks over sources or paths.
     class Analyzer
+      # @param checks [Array<Class>] check classes to run
+      #   (defaults to {Checks.all})
       def initialize(checks: Checks.all)
         @checks = checks
       end
 
+      # @param source [String] Ruby source text
+      # @param path [String] path used in findings
+      # @return [Array<Finding>]
       def analyze_source(source, path:)
         analyze_file(SourceFile.new(source: source, path: path))
       end
 
+      # @param path [String] file to read and analyze
+      # @return [Array<Finding>]
       def analyze_path(path)
         analyze_file(SourceFile.read(path))
       end
@@ -22,8 +30,15 @@ module Audition
       # Scans files across Ractors when there are enough of them to
       # be worth the spawn cost. Checks are plain shareable classes
       # with deeply frozen catalogs, findings copy back through
-      # Ractor#value, and anything unexpected falls back to the
+      # `Ractor#value`, and anything unexpected falls back to the
       # serial path.
+      #
+      # @param paths [Array<String>] files to analyze
+      # @param workers [Integer] Ractor count (defaults to
+      #   processor count minus one)
+      # @param threshold [Integer] minimum file count before
+      #   Ractors are used at all
+      # @return [Array<Finding>]
       def analyze_paths(paths, workers: default_workers,
         threshold: PARALLEL_THRESHOLD)
         if paths.size < threshold || workers <= 1

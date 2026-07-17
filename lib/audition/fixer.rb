@@ -11,10 +11,16 @@ module Audition
   class Fixer
     Plan = Data.define(:path, :source, :edits)
 
+    # @param unsafe [Boolean] also apply `:unsafe` autofixes and
+    #   the multi-site rewriters
     def initialize(unsafe: false)
       @unsafe = unsafe
     end
 
+    # Applies planned edits to the files on disk.
+    #
+    # @param findings [Array<Finding>]
+    # @return [Hash{String => Integer}] path => applied edit count
     def apply(findings)
       plans(findings).to_h do |plan|
         File.write(plan.path, patched(plan))
@@ -22,7 +28,11 @@ module Audition
       end
     end
 
-    # For --dry-run: what would change, without touching anything.
+    # For `--dry-run`: what would change, without touching anything.
+    #
+    # @param findings [Array<Finding>]
+    # @return [Array<Hash>] per file: `:path` and `:hunks`
+    #   (`:line`, `:old`, `:new`)
     def preview(findings)
       plans(findings).map do |plan|
         {path: plan.path, hunks: hunks(plan)}
@@ -35,6 +45,9 @@ module Audition
 
     # How many additional edits the unsafe tier would unlock; used
     # for the "N more with --fix-unsafe" summary hint.
+    #
+    # @param findings [Array<Finding>]
+    # @return [Integer]
     def self.unsafe_gain(findings)
       new(unsafe: true).edit_count(findings) -
         new(unsafe: false).edit_count(findings)

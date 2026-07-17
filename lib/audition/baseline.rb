@@ -43,8 +43,12 @@ module Audition
       @counts = counts
     end
 
-    # Returns [visible_findings, hidden_count]; budget per key is
-    # consumed in finding order.
+    # Budget per key is consumed in finding order.
+    #
+    # @param findings [Array<Finding>]
+    # @param root [String] target root for relative paths
+    # @return [Array(Array<Finding>, Integer)] visible findings
+    #   and the hidden count
     def filter(findings, root:)
       budget = @counts.dup
       hidden = 0

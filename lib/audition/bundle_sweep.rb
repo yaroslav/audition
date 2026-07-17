@@ -17,6 +17,10 @@ module Audition
       :not_ready => 0, :blocked => 1, :risky => 2, :ready => 3, nil => 4
     }.freeze
 
+    # @param lockfile [String] path to a Gemfile.lock
+    # @param static_only [Boolean] skip dynamic probes
+    # @param timeout [Integer] per-probe timeout in seconds
+    # @param concurrency [Integer] worker thread count
     def initialize(lockfile:, static_only: false, timeout: 30,
       concurrency: CONCURRENCY)
       @lockfile = lockfile
@@ -25,6 +29,11 @@ module Audition
       @concurrency = concurrency
     end
 
+    # Audits every locked gem and ranks the results, worst first.
+    #
+    # @param progress [Proc, nil] called with (row, done, total)
+    #   as each gem finishes
+    # @return [Array<Row>]
     def rows(progress: nil)
       gems = locked_gems
       queue = Thread::Queue.new
