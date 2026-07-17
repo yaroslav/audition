@@ -87,6 +87,10 @@ jobs:
           VERSION="${{ needs.version.outputs.version }}"
           awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found{print}" \
             CHANGELOG.md > /tmp/release_notes.md
+          if ! grep -q "[^[:space:]]" /tmp/release_notes.md; then
+            echo "CHANGELOG.md has no section for ${VERSION}; refusing to release without notes"
+            exit 1
+          fi
           cat /tmp/release_notes.md
 
       # Creates the git tag at github.sha and the GitHub Release in
