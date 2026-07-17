@@ -1,0 +1,13 @@
+# For available configuration options, see:
+#   https://github.com/standardrb/standard
+ruby_version: 4.0
+
+ignore:
+  # The dynamic harness is intentionally Ractor-hostile in places:
+  # its capability probes create globals on purpose.
+  # It also rescues Exception by design: a probe harness must
+  # survive whatever the audited code throws.
+  - lib/audition/dynamic/harness.rb:
+      - Style/GlobalVars
+      - Lint/RescueException
+      - Lint/SuppressedException

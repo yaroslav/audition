@@ -1,0 +1,134 @@
+# frozen_string_literal: true
+
+require "prism"
+
+module Audition
+  module Static
+    module Checks
+      # A check is a Prism visitor plus a message catalog, written in
+      # a small declarative DSL:
+      #
+      #   class MyCheck < Base
+      #     check_name "my-check"           # optional; derived
+      #
+      #     explain :bad_thing,
+      #             severity: :error,
+      #             message: "found %{name}",
+      #             why: "it breaks because ...",
+      #             fix: "do this instead ..."
+      #
+      #     on :call_node do |node|
+      #       flag(node, :bad_thing, name: node.name)
+      #     end
+      #   end
+      #
+      # `on` generates the visit method and always continues into
+      # child nodes, so handlers cannot accidentally stop traversal.
+      # Third-party checks plug in via Checks.register(MyCheck).
+      class Base < Prism::Visitor
+        EMPTY_CATALOG = {}.freeze
+
+        class << self
+          # No lazy memoization here: checks must be readable from
+          # non-main Ractors (parallel scanning), so class-level
+          # state is written eagerly on the main Ractor at class
+          # definition time and kept deeply shareable.
+          def check_name(value = nil)
+            @check_name = -value if value # audition:disable class-level-state
+            @check_name || name.split("::").last
+              .gsub(/([a-z0-9])([A-Z])/, '\1-\2').downcase
+          end
+
+          def explanations
+            @explanations || EMPTY_CATALOG
+          end
+
+          def explain(key, severity:, message:, why:, fix:)
+            entry = {
+              severity: severity, message: message,
+              why: why, fix: fix
+            }
+            @explanations = Ractor.make_shareable( # audition:disable
+              explanations.merge(key => entry)
+            )
+          end
+
+          def handlers
+            @handlers || EMPTY_CATALOG
+          end
+
+          # Methods born from define_method carry their block as a
+          # Proc, and Ruby refuses to call them from another Ractor
+          # unless that Proc is shareable. Both the handler and the
+          # generated wrapper are therefore isolated via
+          # Ractor.make_shareable; the wrapper looks its handler up
+          # through __method__ and continues traversal explicitly
+          # (super is not available inside an isolated proc, and
+          # this reproduces Prism::Visitor's default body).
+          WRAPPER = Ractor.make_shareable(
+            proc do |node|
+              handler_for(__method__, node)
+              node.each_child_node { |child| child.accept(self) }
+            end
+          )
+
+          def on(*node_types, &handler)
+            isolated = Ractor.make_shareable(handler)
+            node_types.each do |type|
+              method_name = :"visit_#{type}"
+              @handlers = Ractor.make_shareable( # audition:disable
+                handlers.merge(method_name => isolated)
+              )
+              define_method(method_name, &WRAPPER)
+            end
+          end
+
+          def call(file)
+            visitor = new(file)
+            visitor.visit(file.root)
+            visitor.findings
+          end
+        end
+
+        attr_reader :file, :findings
+
+        def initialize(file)
+          @file = file
+          @findings = []
+          super()
+        end
+
+        private
+
+        def handler_for(method_name, node)
+          instance_exec(node, &self.class.handlers.fetch(method_name))
+        end
+
+        def flag(node, key, autofix: nil, **interp)
+          spec = self.class.explanations.fetch(key)
+          add(node,
+            severity: spec[:severity],
+            message: format(spec[:message], **interp),
+            why: format(spec[:why], **interp),
+            fix: format(spec[:fix], **interp),
+            autofix: autofix)
+        end
+
+        def add(node, severity:, message:, why:, fix:, autofix: nil)
+          line = node.location.start_line
+          @findings << Finding.new(
+            check: self.class.check_name,
+            severity: severity,
+            message: message,
+            why: why,
+            fix: fix,
+            path: file.path,
+            line: line,
+            source: file.line_at(line),
+            autofix: autofix
+          )
+        end
+      end
+    end
+  end
+end

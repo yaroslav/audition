@@ -1,0 +1,59 @@
+name: Release
+
+# Triggered manually. Builds the gem from the current commit,
+# smoke-tests the installed executable, and (only if that passes)
+# creates a git tag plus GitHub Release and publishes to RubyGems.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION=$(ruby -e "require_relative 'lib/audition/version'; print Audition::VERSION")
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build gem
+        run: bundle exec rake build
+
+      - name: Smoke-test installed gem
+        run: |
+          gem install pkg/audition-*.gem
+          echo '$counter = 0' > /tmp/hostile.rb
+          if audition --plain --static-only /tmp/hostile.rb; then
+            echo "expected exit 1 for a hostile script" && exit 1
+          fi
+          audition --plain --static-only /tmp/hostile.rb \
+            | grep -q "not ractor-ready"
+          audition --capabilities > /dev/null
+          echo "smoke test passed"
+
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" pkg/audition-*.gem \
+            --title "$TAG" \
+            --notes "See CHANGELOG.md for details."
+
+      - name: Publish to RubyGems
+        env:
+          GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+        run: gem push pkg/audition-*.gem
