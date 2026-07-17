@@ -2,23 +2,20 @@ name: Release
 
 # Triggered manually. Builds the gem from the current commit,
 # smoke-tests the installed executable, and (only if that passes)
-# creates a git tag plus GitHub Release and publishes to RubyGems.
+# creates a git tag plus GitHub Release atomically and publishes to
+# RubyGems via OIDC trusted publishing.
 on:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  release:
+  # Read version from version.rb.
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
-
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: "4.0"
-          bundler-cache: true
 
       - name: Read version
         id: version
@@ -26,6 +23,19 @@ jobs:
           VERSION=$(ruby -e "require_relative 'lib/audition/version'; print Audition::VERSION")
           echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
 
       - name: Build gem
         run: bundle exec rake build
@@ -42,18 +52,61 @@ jobs:
           audition --capabilities > /dev/null
           echo "smoke test passed"
 
-      - name: Create tag and GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${{ steps.version.outputs.tag }}"
-          git tag "$TAG"
-          git push origin "$TAG"
-          gh release create "$TAG" pkg/audition-*.gem \
-            --title "$TAG" \
-            --notes "See CHANGELOG.md for details."
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gems-source
+          path: pkg/*.gem
 
-      - name: Publish to RubyGems
+  # Publish: create git tag + GitHub Release (atomic) + push to
+  # RubyGems via OIDC.
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: gems-*
+          path: pkg
+          merge-multiple: true
+
+      - name: Extract changelog for this version
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          awk "/^## \[${VERSION}\]/{found=1; next} /^## \[/{if(found) exit} found{print}" \
+            CHANGELOG.md > /tmp/release_notes.md
+          cat /tmp/release_notes.md
+
+      # Creates the git tag at github.sha and the GitHub Release in
+      # one call. If this step fails, no tag is pushed.
+      - name: Create git tag and GitHub Release
         env:
-          GEM_HOST_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
-        run: gem push pkg/audition-*.gem
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ needs.version.outputs.tag }}" \
+            --target "${{ github.sha }}" \
+            --title "Audition ${{ needs.version.outputs.version }}" \
+            --notes-file /tmp/release_notes.md \
+            pkg/*.gem
+
+      - name: Configure RubyGems credentials
+        uses: rubygems/configure-rubygems-credentials@main
+
+      - name: Push gem to RubyGems
+        run: |
+          for gem in pkg/*.gem; do
+            echo "Pushing ${gem}"
+            gem push "${gem}"
+          done
