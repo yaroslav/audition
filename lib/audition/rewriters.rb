@@ -15,10 +15,14 @@ module Audition
       FSL_LINE = "# frozen_string_literal: true\n"
 
       # `shareable_constant_value: literal` raises at load for
-      # non-literal constant values (verified on 4.0), so it is only
-      # planned when every constant assignment in the file
-      # classifies as a literal. Otherwise, if the flagged values
-      # are all strings, frozen_string_literal covers them.
+      # non-literal constant values (verified on 4.0), so it is
+      # only planned when every constant assignment in the file is
+      # a literal all the way down: an array literal holding a
+      # local or a call (Racc-generated parser tables are the
+      # canonical case) becomes an unshareable value that the
+      # magic comment rejects at load time. Otherwise, if the
+      # flagged values are all strings, frozen_string_literal
+      # covers them.
       def self.plan(file, findings)
         return nil if file.shareable_constants?
         return nil if findings.none? { |f| f.check == "mutable-constants" }
@@ -26,13 +30,13 @@ module Audition
         classifier = Static::LiteralClassifier.new(
           frozen_string_literal: file.frozen_string_literal?
         )
-        kinds = constant_values(file).map { |v| classifier.classify(v) }
+        values = constant_values(file)
+        kinds = values.map { |v| classifier.classify(v) }
         flagged = kinds.reject do |k|
           %i[shareable unknown].include?(k)
         end
-        scv_ok = kinds.all? do |k|
-          %i[shareable mutable_string mutable_container
-            shallow_freeze].include?(k)
+        scv_ok = values.all? do |value|
+          deep_literal?(value, classifier)
         end
 
         if scv_ok
@@ -40,6 +44,28 @@ module Audition
         elsif !file.frozen_string_literal? &&
             flagged.all? { |k| k == :mutable_string }
           comment_plan(file, FSL_LINE)
+        end
+      end
+
+      def self.deep_literal?(node, classifier)
+        case node
+        when Prism::ArrayNode
+          node.elements.all? do |element|
+            deep_literal?(element, classifier)
+          end
+        when Prism::HashNode, Prism::KeywordHashNode
+          node.elements.all? do |element|
+            element.is_a?(Prism::AssocNode) &&
+              deep_literal?(element.key, classifier) &&
+              deep_literal?(element.value, classifier)
+          end
+        when Prism::CallNode
+          node.name == :freeze && node.arguments.nil? &&
+            node.receiver &&
+            deep_literal?(node.receiver, classifier)
+        else
+          %i[shareable mutable_string]
+            .include?(classifier.classify(node))
         end
       end
 
@@ -126,6 +152,7 @@ module Audition
           memos = memo_sites(ops)
           next if memos.empty?
           next if orphan_guards?(ops, memos)
+          next if guarded_with_strays?(ops, memos)
 
           if freezable?(ops, memos)
             edits.concat(freeze_edits(file, memos))
@@ -151,6 +178,15 @@ module Audition
             guard = guards.find { |g| g[:def_id] == op[:def_id] }
             {op: op, guard: guard} if guard
           end
+        end
+      end
+
+      def self.guarded_with_strays?(ops, memos)
+        return false if memos.none? { |memo| memo[:guard] }
+
+        memo_ops = memos.map { |memo| memo[:op] }
+        ops.any? do |op|
+          op[:kind] == :write && !memo_ops.include?(op)
         end
       end
 
@@ -244,8 +280,22 @@ module Audition
         end
       end
 
+      # Two Ractor-local flavors. With stray writes present (cache
+      # invalidation, `@x = nil`), memo sites become
+      # `Ractor.current[key] ||= expr`: it recomputes after a nil
+      # reset exactly like the original `||=`, where
+      # store_if_absent would treat the stored nil as present and
+      # never recompute (this broke i18n's reserved_keys_pattern).
+      # Without strays, store_if_absent keeps its atomic lazy
+      # init. Guard-idiom groups with strays are skipped entirely
+      # in plan: the defined? guard caches nil deliberately and
+      # neither flavor reproduces that alongside invalidation.
       def self.ractor_edits(file, ops, memos, key)
         guarded = memos.filter_map { |m| m[:op] if m[:guard] }
+        memo_ops = memos.map { |memo| memo[:op] }
+        strays = ops.any? do |op|
+          op[:kind] == :write && !memo_ops.include?(op)
+        end
         edits = memos.filter_map do |memo|
           deletion(file.source, memo[:guard][:node]) if memo[:guard]
         end
@@ -253,10 +303,17 @@ module Audition
           node = op[:node]
           edits <<
             if op[:kind] == :or_write || guarded.include?(op)
+              replacement =
+                if strays
+                  value = node.value.location.slice
+                  "Ractor.current[#{key}] ||= #{value}"
+                else
+                  store_wrap(file.source, node, key)
+                end
               Autofix.new(
                 start_offset: node.location.start_offset,
                 end_offset: node.location.end_offset,
-                replacement: store_wrap(file.source, node, key),
+                replacement: replacement,
                 safety: :unsafe
               )
             elsif op[:kind] == :write

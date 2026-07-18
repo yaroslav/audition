@@ -18,6 +18,22 @@
   `ready`.
 - `--dry-run` previews render touching edits as a single hunk
   instead of repeating a line in two half-applied states.
+- Battle-tested against i18n; its full suite passes after
+  `--fix-unsafe`. Five fixer bugs found and fixed in the process:
+  autoload conversion keeps the registration and appends the
+  eager require at the end of the file (converting in
+  registration order broke mutually referencing files); the
+  conversion is withheld for files guarded by `rescue LoadError`
+  or resolving outside the target (optional dependencies);
+  require hoisting moved to the unsafe tier (eager loading is not
+  behavior-preserving for context-sensitive files);
+  `shareable_constant_value` is only inserted when every constant
+  is a literal all the way down (Racc parser tables are array
+  literals full of locals and raise at load otherwise), and the
+  insertion ignores doc comments that merely look like magic
+  comments; caches with nil invalidation convert to
+  `Ractor.current[key] ||=`, preserving reset semantics where
+  `store_if_absent` would cache the nil forever.
 - New checks trained on the Rails core ractorization effort
   (documented in docs/rails_core_best_practices.md): `Hash.new`
   with a default proc (the block survives `.freeze`), in-place

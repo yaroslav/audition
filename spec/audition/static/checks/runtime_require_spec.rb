@@ -22,7 +22,7 @@ RSpec.describe Audition::Static::Checks::RuntimeRequire do
     finding = findings.first
     expect(finding.severity).to eq(:warning)
     expect(finding.why).to include("main Ractor")
-    expect(finding.autofix.safety).to eq(:safe)
+    expect(finding.autofix.safety).to eq(:unsafe)
 
     fix = finding.autofix
     fixed = code.dup
@@ -62,15 +62,69 @@ RSpec.describe Audition::Static::Checks::RuntimeRequire do
     expect(findings.none?(&:fixable?)).to be(true)
   end
 
-  it "gives autoload an unsafe require conversion" do
-    code = 'autoload :JSON, "json"'
-    finding = findings_for(code).first
+  it "gives autoload an eager require appended at file end" do
+    Dir.mktmpdir do |dir|
+      code = <<~RUBY
+        module Backend
+          autoload :Base, "base"
+        end
+      RUBY
+      path = File.join(dir, "backend.rb")
+      File.write(path, code)
+      File.write(File.join(dir, "base.rb"), "module Base; end\n")
 
-    expect(finding.autofix.safety).to eq(:unsafe)
-    fix = finding.autofix
-    fixed = code.dup
-    fixed[fix.start_offset...fix.end_offset] = fix.replacement
-    expect(fixed).to eq('require "json"')
+      finding = Audition::Static::Analyzer.new(
+        checks: [described_class]
+      ).analyze_path(path).first
+
+      expect(finding.autofix.safety).to eq(:unsafe)
+      fix = finding.autofix
+      fixed = code.dup
+      fixed[fix.start_offset...fix.end_offset] = fix.replacement
+      expect(fixed).to eq(<<~RUBY)
+        module Backend
+          autoload :Base, "base"
+        end
+        require "base"
+      RUBY
+    end
+  end
+
+  it "withholds the autofix for optional-dependency autoloads" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "backend.rb")
+      File.write(path, <<~RUBY)
+        module Backend
+          autoload :KeyValue, "key_value"
+          autoload :External, "some_gem"
+        end
+      RUBY
+      File.write(File.join(dir, "key_value.rb"), <<~RUBY)
+        begin
+          require "oj"
+        rescue LoadError
+          require "json"
+        end
+      RUBY
+
+      findings = Audition::Static::Analyzer.new(
+        checks: [described_class]
+      ).analyze_path(path)
+
+      expect(findings.size).to eq(2)
+      expect(findings.none?(&:fixable?)).to be(true)
+    end
+  end
+
+  it "leaves autoload alone when the feature is required eagerly" do
+    findings = findings_for(<<~RUBY)
+      module Backend
+        autoload :JSON, "json"
+      end
+      require "json"
+    RUBY
+
+    expect(findings).to be_empty
   end
 
   it "flags require_relative and load inside methods" do

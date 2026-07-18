@@ -80,6 +80,15 @@ module Audition
         end
       end
 
+      # Keys Ruby actually honors. Prism reports every comment
+      # shaped like `# key: value`, which sweeps up documentation
+      # (`# I18n.t: 'date.formats.short'`); inserting after those
+      # would land a magic comment mid-file.
+      MAGIC_KEYS = %w[
+        encoding coding frozen_string_literal
+        shareable_constant_value warn_indent
+      ].freeze
+
       # Where a new magic comment can go: after the shebang and any
       # existing magic comments, before code.
       def magic_insertion_offset
@@ -88,7 +97,9 @@ module Audition
           newline = source.index("\n")
           offset = newline ? newline + 1 : source.bytesize
         end
-        after_magic = parse_result.magic_comments.map do |mc|
+        after_magic = parse_result.magic_comments.filter_map do |mc|
+          next unless MAGIC_KEYS.include?(mc.key_loc.slice)
+
           newline = source.index("\n", mc.value_loc.end_offset)
           newline ? newline + 1 : source.bytesize
         end.max

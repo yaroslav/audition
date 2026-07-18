@@ -43,8 +43,10 @@ module Audition
                   autofix: hoist_autofix(node))
               end
             elsif node.name == :autoload
-              flag(node, :autoload,
-                autofix: require_conversion_autofix(node))
+              unless eagerly_loaded?(node)
+                flag(node, :autoload,
+                  autofix: require_conversion_autofix(node))
+              end
             end
           end
         end
@@ -80,10 +82,12 @@ module Audition
             file.top_level_requires.include?(feature.unescaped)
         end
 
-        # Requiring is idempotent, so inserting a boot-time
-        # duplicate preserves semantics exactly while removing the
-        # runtime serialization. `load` is excluded: it re-executes
-        # on every call.
+        # Requiring is idempotent, so a boot-time duplicate leaves
+        # the method's behavior alone; but it does load the feature
+        # in every context, and files can be deliberately lazy
+        # (optional dependencies, i18n's test-DSL mixins), so this
+        # is unsafe tier. `load` is excluded: it re-executes on
+        # every call.
         def hoist_autofix(node)
           feature = literal_feature(node)
           return nil unless feature
@@ -93,11 +97,11 @@ module Audition
           statement = "#{node.name} #{feature.location.slice}"
           if insertion[:after_require]
             Autofix.new(start_offset: offset, end_offset: offset,
-              replacement: "#{statement}\n")
+              replacement: "#{statement}\n", safety: :unsafe)
           else
             offset += 1 if newline_at?(offset)
             Autofix.new(start_offset: offset, end_offset: offset,
-              replacement: "#{statement}\n\n")
+              replacement: "#{statement}\n\n", safety: :unsafe)
           end
         end
 
@@ -105,18 +109,68 @@ module Audition
           file.source.byteslice(offset, 1) == "\n"
         end
 
-        # Eager require is exactly the trade a Ractor deployment
-        # wants, but it changes load timing: unsafe tier.
-        def require_conversion_autofix(node)
+        # The eager conversion is only offered when the autoloaded
+        # feature resolves to a file inside the target itself and
+        # that file carries no optional-dependency guard: a
+        # `rescue LoadError` means the file is deliberately lazy
+        # (i18n's key_value backend), and a feature that does not
+        # resolve locally may not even be installed.
+        def convertible_feature?(feature)
+          candidate = resolve_locally(feature)
+          !candidate.nil? &&
+            !File.read(candidate).include?("rescue LoadError")
+        rescue SystemCallError
+          false
+        end
+
+        def resolve_locally(feature)
+          roots = [File.dirname(file.path)]
+          if (index = file.path.rindex("/lib/"))
+            roots << file.path[0, index + 4]
+          end
+          roots.filter_map { |root|
+            candidate = File.join(root, "#{feature}.rb")
+            candidate if File.file?(candidate)
+          }.first
+        end
+
+        def autoload_feature(node)
           args = node.arguments&.arguments
           return nil unless args&.size == 2 &&
             args[0].is_a?(Prism::SymbolNode) &&
             args[1].is_a?(Prism::StringNode)
 
+          args[1]
+        end
+
+        # An autoload whose feature is also required at the top
+        # level of the same file is eagerly loaded; the remaining
+        # registration is a harmless safety net.
+        def eagerly_loaded?(node)
+          feature = autoload_feature(node)
+          !feature.nil? &&
+            file.top_level_requires.include?(feature.unescaped)
+        end
+
+        # Eager require is exactly the trade a Ractor deployment
+        # wants, but it changes load timing: unsafe tier. The
+        # autoload line stays and the require lands at the end of
+        # the file, after every registration in it: requiring in
+        # registration order breaks mutual references (file A
+        # loads first, references B, whose registration was
+        # converted away), while a kept registration resolves any
+        # constant the eager load path touches.
+        def require_conversion_autofix(node)
+          feature = autoload_feature(node)
+          return nil unless feature
+          return nil unless convertible_feature?(feature.unescaped)
+
+          eof = file.source.length
+          statement = "require #{feature.location.slice}\n"
           Autofix.new(
-            start_offset: node.location.start_offset,
-            end_offset: node.location.end_offset,
-            replacement: "require #{args[1].location.slice}",
+            start_offset: eof,
+            end_offset: eof,
+            replacement: statement,
             safety: :unsafe
           )
         end

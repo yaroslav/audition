@@ -39,6 +39,41 @@ RSpec.describe "unsafe rewriters" do
     end
   end
 
+  it "ignores doc comments that look like magic comments" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "docs.rb", <<~RUBY)
+        # Usage:
+        #
+        #   I18n.t: 'date.formats.short'
+        #
+        NAME = "audition"
+      RUBY
+
+      fix!(path)
+
+      lines = File.read(path).lines
+      expect(lines.first)
+        .to eq("# shareable_constant_value: literal\n")
+    end
+  end
+
+  it "refuses shareable_constant_value for containers of locals" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "racc.rb", <<~RUBY)
+        table = build_table
+        RACC_ARG = [table, 42]
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).not_to include("shareable_constant_value")
+      expect(content).to include(
+        "RACC_ARG = Ractor.make_shareable([table, 42])"
+      )
+    end
+  end
+
   it "inserts frozen_string_literal when strings are the issue" do
     Dir.mktmpdir do |dir|
       path = write(dir, "strings.rb", <<~RUBY)
@@ -71,16 +106,18 @@ RSpec.describe "unsafe rewriters" do
     end
   end
 
-  it "rewrites singleton memoization to Ractor-local storage" do
+  it "keeps nil invalidation working for reset caches" do
     Dir.mktmpdir do |dir|
       path = write(dir, "store.rb", <<~RUBY)
         class Store
-          def self.config
-            @config ||= { "a" => 1 }
+          def self.pattern
+            @pattern ||= compute
           end
 
-          def self.prime
-            @config = { "a" => 2 }
+          def self.compute = "v\#{@count = (@count || 0) + 1}"
+
+          def self.reset!
+            @pattern = nil
           end
         end
       RUBY
@@ -89,21 +126,25 @@ RSpec.describe "unsafe rewriters" do
 
       content = File.read(path)
       expect(content).to include(
-        'Ractor.store_if_absent(:"Store/@config") { { "a" => 1 } }'
+        'Ractor.current[:"Store/@pattern"] ||= compute'
       )
       expect(content).to include(
-        'Ractor.current[:"Store/@config"] = { "a" => 2 }'
+        'Ractor.current[:"Store/@pattern"] = nil'
       )
+      expect(content).not_to include("store_if_absent")
 
       script = <<~RUBY
-        Warning[:experimental] = false
         require #{path.inspect}
-        value = Ractor.new { Store.config["a"] }.value
-        raise "broken" unless value == 1
-        print "works-in-ractor"
+        first = Store.pattern
+        cached = Store.pattern
+        Store.reset!
+        second = Store.pattern
+        raise "no cache" unless first == "v1" && cached == "v1"
+        raise "reset lost" unless second == "v2"
+        print "invalidation-works"
       RUBY
       out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
-      expect(out).to eq("works-in-ractor"), err
+      expect(out).to eq("invalidation-works"), err
     end
   end
 
@@ -326,6 +367,46 @@ RSpec.describe "unsafe rewriters" do
       expect(content).to include("def maximum = MAXIMUM")
       expect(content).not_to include("@@maximum")
       expect(Prism.parse(content).success?).to be(true)
+    end
+  end
+
+  it "converts autoload clusters without breaking load order" do
+    Dir.mktmpdir do |dir|
+      entry = write(dir, "backend.rb", <<~RUBY)
+        module Backend
+          autoload :Base,   "base"
+          autoload :Helper, "helper"
+        end
+      RUBY
+      write(dir, "base.rb", <<~RUBY)
+        module Backend
+          module Base
+            include Backend::Helper
+            OK = "ok"
+          end
+        end
+      RUBY
+      write(dir, "helper.rb", <<~RUBY)
+        module Backend
+          module Helper
+          end
+        end
+      RUBY
+
+      fix!(entry)
+
+      content = File.read(entry)
+      expect(content).to include(%(autoload :Base,   "base"))
+      expect(content.lines.last(2)).to all(match(/\Arequire "/))
+      expect(all_findings(entry)).to be_empty
+
+      script = <<~RUBY
+        $LOAD_PATH.unshift(#{dir.inspect})
+        require "backend"
+        print Backend::Base::OK
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("ok"), err
     end
   end
 
