@@ -58,6 +58,18 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     expect(findings).to be_empty
   end
 
+  it "refuses make_shareable for containers of sync primitives" do
+    findings = findings_for(<<~RUBY)
+      MUTEXES = { adapter: Mutex.new }.freeze
+      LOCKS = [Mutex.new]
+    RUBY
+
+    expect(findings.size).to eq(2)
+    expect(findings).to all(have_attributes(severity: :error))
+    expect(findings.none?(&:fixable?)).to be(true)
+    expect(findings.first.message).to include("sync primitive")
+  end
+
   it "flags Hash.new with a default proc, even frozen" do
     findings = findings_for(<<~RUBY)
       TABLE = Hash.new { |h, k| h[k] = [] }

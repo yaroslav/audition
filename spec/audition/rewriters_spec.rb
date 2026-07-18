@@ -25,7 +25,7 @@ RSpec.describe "unsafe rewriters" do
         # frozen_string_literal: true
 
         CACHE = {}
-        TABLES = [[1], [2]].freeze
+        TABLES = [[1], [2]]
       RUBY
 
       fix!(path)
@@ -36,6 +36,52 @@ RSpec.describe "unsafe rewriters" do
       expect(content).to include("CACHE = {}\n")
       expect(content).not_to include("make_shareable")
       expect(all_findings(path)).to be_empty
+
+      out, err, = Open3.capture3(RbConfig.ruby, path)
+      expect(err).to eq(""), err
+      expect(out).to eq("")
+    end
+  end
+
+  it "keeps shareable_constant_value away from frozen literals" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "curves.rb", <<~RUBY)
+        # frozen_string_literal: true
+
+        CURVES = {
+          "prime256v1" => { algorithm: "ES256" }
+        }.freeze
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).not_to include("shareable_constant_value")
+      expect(content).to include(
+        "CURVES = Ractor.make_shareable({"
+      )
+      _, err, = Open3.capture3(RbConfig.ruby, path)
+      expect(err).to eq(""), err
+    end
+  end
+
+  it "applies edits by byte offset in multibyte files" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "unicode.rb", <<~RUBY)
+        # arrows: ↓ ■ ○ and more ünïcode before the constant
+        DYNAMIC = compute
+        TABLE = { 65516 => "↓", 65517 => "■" }
+        TAIL = 42
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(Prism.parse(content).success?).to be(true)
+      expect(content).to include("TAIL = 42")
+      expect(content).to include(
+        'Ractor.make_shareable({ 65516 => "↓", 65517 => "■" })'
+      )
     end
   end
 
@@ -172,13 +218,13 @@ RSpec.describe "unsafe rewriters" do
 
       content = File.read(path)
       expect(content).to include(
-        "@windows = RUBY_PLATFORM.match?(/mswin|mingw/).freeze"
+        "@windows = Ractor.make_shareable(" \
+        "RUBY_PLATFORM.match?(/mswin|mingw/))"
       )
       expect(content).to include(
         '@separator = (windows? ? ";" : ":").freeze'
       )
       expect(content).to include("defined?(@windows)")
-      expect(content).not_to include("Ractor")
       expect(all_findings(path).none?(&:error?)).to be(true)
 
       script = <<~RUBY
@@ -218,7 +264,8 @@ RSpec.describe "unsafe rewriters" do
       content = File.read(path)
       expect(content).to include(%(executable = "bun"\n))
       expect(content).to include(
-        '@binary_path = File.join("/opt", executable).freeze'
+        "@binary_path = Ractor.make_shareable(" \
+        'File.join("/opt", executable))'
       )
       expect(content).to include("defined?(@binary_path)")
       expect(all_findings(path).none?(&:error?)).to be(true)
@@ -243,10 +290,63 @@ RSpec.describe "unsafe rewriters" do
 
       content = File.read(path)
       expect(content).to include(
-        '@root = File.expand_path("..").freeze'
+        '@root = Ractor.make_shareable(File.expand_path(".."))'
       )
       expect(content).to include('File.join(@root, "doc")')
       expect(all_findings(path).none?(&:error?)).to be(true)
+    end
+  end
+
+  it "leaves empty-container accumulators alone" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        class Registry
+          def self.algorithms = (@algorithms ||= {})
+
+          def self.register(key, value)
+            algorithms[key] = value
+          end
+        end
+      RUBY
+      path = write(dir, "registry.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+      expect(all_findings(path).any?(&:error?)).to be(true)
+    end
+  end
+
+  it "never freezes memoized classes" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "selector.rb", <<~RUBY)
+        class Selector
+          def self.pick
+            return @pick if defined?(@pick)
+
+            @pick = const_get(:Adapter)
+          end
+
+          class Adapter
+          end
+        end
+      RUBY
+
+      fix!(path)
+
+      expect(File.read(path)).to include(
+        "@pick = Ractor.make_shareable(const_get(:Adapter))"
+      )
+
+      script = <<~RUBY
+        require #{path.inspect}
+        klass = Selector.pick
+        klass.instance_variable_set(:@memo, 1)
+        raise "frozen class" if klass.frozen?
+        print "class-untouched"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("class-untouched"), err
     end
   end
 

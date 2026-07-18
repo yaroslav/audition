@@ -34,6 +34,24 @@
   comments; caches with nil invalidation convert to
   `Ractor.current[key] ||=`, preserving reset semantics where
   `store_if_absent` would cache the nil forever.
+- Battle-tested against five more gems (multi_json, jwt, tzinfo,
+  addressable, public_suffix); every suite passes after
+  `--fix-unsafe` except two public_suffix assertions that inspect
+  the moved ivar itself. Six more fixer bugs found and fixed:
+  edits are spliced by byte offset (multibyte sources, such as
+  addressable's Unicode tables, were corrupted by
+  character-indexed splicing); containers holding sync primitives
+  classify as sync primitives and get no wrap
+  (Ractor.make_shareable on multi_json's Hash of Mutexes raised
+  at load); memoized values that are not provably strings get
+  Ractor.make_shareable instead of `.freeze` (freezing a
+  memoized adapter Class froze the class object); ternaries of
+  string literals classify as strings so they keep a plain
+  parenthesized `.freeze`; `shareable_constant_value` requires
+  bare literals (a frozen literal is a method call and raises at
+  assignment, as jwt's NAMED_CURVES showed); empty-container
+  memo accumulators (`@x ||= {}` registries) and rescue-guarded
+  requires (tzinfo's optional tzinfo-data) are left for humans.
 - New checks trained on the Rails core ractorization effort
   (documented in docs/rails_core_best_practices.md): `Hash.new`
   with a default proc (the block survives `.freeze`), in-place

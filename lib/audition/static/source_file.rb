@@ -72,12 +72,19 @@ module Audition
             %i[require require_relative].include?(s.name)
         end
         if last_require
-          newline = source.index("\n", last_require.location.end_offset)
-          offset = newline ? newline + 1 : source.bytesize
+          newline = raw.index("\n", last_require.location.end_offset)
+          offset = newline ? newline + 1 : raw.bytesize
           {offset: offset, after_require: true}
         else
           {offset: leading_comments_end, after_require: false}
         end
+      end
+
+      # Prism reports byte offsets; index math against the source
+      # must run on a binary copy or multibyte content shifts
+      # every computed position.
+      def raw
+        @raw ||= source.dup.force_encoding(Encoding::BINARY)
       end
 
       # Keys Ruby actually honors. Prism reports every comment
@@ -93,15 +100,15 @@ module Audition
       # existing magic comments, before code.
       def magic_insertion_offset
         offset = 0
-        if source.start_with?("#!")
-          newline = source.index("\n")
-          offset = newline ? newline + 1 : source.bytesize
+        if raw.start_with?("#!")
+          newline = raw.index("\n")
+          offset = newline ? newline + 1 : raw.bytesize
         end
         after_magic = parse_result.magic_comments.filter_map do |mc|
           next unless MAGIC_KEYS.include?(mc.key_loc.slice)
 
-          newline = source.index("\n", mc.value_loc.end_offset)
-          newline ? newline + 1 : source.bytesize
+          newline = raw.index("\n", mc.value_loc.end_offset)
+          newline ? newline + 1 : raw.bytesize
         end.max
         [offset, after_magic || 0].max
       end

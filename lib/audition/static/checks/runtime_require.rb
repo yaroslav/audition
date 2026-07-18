@@ -39,8 +39,9 @@ module Audition
           if node.receiver.nil?
             if REQUIRE_METHODS.include?(node.name) && inside_def?
               unless hoisted_already?(node)
+                autofix = rescued? ? nil : hoist_autofix(node)
                 flag(node, :runtime_require, method: node.name,
-                  autofix: hoist_autofix(node))
+                  autofix: autofix)
               end
             elsif node.name == :autoload
               unless eagerly_loaded?(node)
@@ -58,11 +59,39 @@ module Audition
           @def_depth -= 1
         end
 
+        # A require under a rescue is conditional by construction
+        # (optional dependencies, tzinfo's tzinfo-data); hoisting
+        # it to an unguarded top-level require breaks every
+        # installation without the feature.
+        def visit_begin_node(node)
+          if node.rescue_clause
+            @rescue_depth = rescue_depth + 1
+            begin
+              super
+            ensure
+              @rescue_depth -= 1
+            end
+          else
+            super
+          end
+        end
+
+        def visit_rescue_modifier_node(node)
+          @rescue_depth = rescue_depth + 1
+          super
+        ensure
+          @rescue_depth -= 1
+        end
+
         private
 
         def def_depth = @def_depth ||= 0
 
         def inside_def? = def_depth.positive?
+
+        def rescue_depth = @rescue_depth ||= 0
+
+        def rescued? = rescue_depth.positive?
 
         def literal_feature(node)
           return nil unless node.name == :require ||
@@ -165,7 +194,7 @@ module Audition
           return nil unless feature
           return nil unless convertible_feature?(feature.unescaped)
 
-          eof = file.source.length
+          eof = file.source.bytesize
           statement = "require #{feature.location.slice}\n"
           Autofix.new(
             start_offset: eof,

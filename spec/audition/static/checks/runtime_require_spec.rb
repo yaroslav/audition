@@ -52,6 +52,20 @@ RSpec.describe Audition::Static::Checks::RuntimeRequire do
     expect(findings).to be_empty
   end
 
+  it "offers no hoist for rescue-guarded optional requires" do
+    findings = findings_for(<<~RUBY)
+      def load_data
+        require "tzinfo/data"
+        true
+      rescue LoadError
+        false
+      end
+    RUBY
+
+    expect(findings.size).to eq(1)
+    expect(findings.none?(&:fixable?)).to be(true)
+  end
+
   it "offers no hoist for load or dynamic features" do
     findings = findings_for(<<~RUBY)
       def a = load("y.rb")

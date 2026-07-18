@@ -45,7 +45,7 @@ module Audition
           classify_interpolated_string(node)
         when Prism::ArrayNode, Prism::HashNode,
              Prism::KeywordHashNode
-          :mutable_container
+          container_kind(node)
         when Prism::RangeNode
           ends = [node.left, node.right].compact
           if ends.all? { |n| classify(n) == :shareable }
@@ -57,6 +57,8 @@ module Audition
           :proc
         when Prism::CallNode
           classify_call(node)
+        when Prism::IfNode
+          ternary_kind(node)
         else
           :unknown
         end
@@ -130,21 +132,66 @@ module Audition
         end
       end
 
+      # A container holding a sync primitive can never become
+      # shareable; Ractor.make_shareable raises on it (multi_json
+      # keeps a frozen Hash of Mutexes). The classification
+      # propagates so no freeze or wrap is ever suggested.
+      def container_kind(node)
+        sync = node.elements.any? do |element|
+          element_children(element).any? do |child|
+            classify(child) == :sync_primitive
+          end
+        end
+        sync ? :sync_primitive : :mutable_container
+      end
+
+      def element_children(element)
+        case element
+        when Prism::AssocNode then [element.key, element.value]
+        else [element]
+        end
+      end
+
+      # A ternary of provable branches classifies as the worst
+      # branch: two string literals make a string, so a plain
+      # `.freeze` stays available for `cond ? ";" : ":"`.
+      def ternary_kind(node)
+        return :unknown unless node.subsequent
+          .is_a?(Prism::ElseNode)
+
+        branches = [
+          single_statement(node.statements),
+          single_statement(node.subsequent.statements)
+        ]
+        return :unknown unless branches.all?
+
+        kinds = branches.map { |branch| classify(branch) }
+        return :shareable if kinds.all?(:shareable)
+
+        if kinds.all? { |k| %i[shareable mutable_string].include?(k) }
+          :mutable_string
+        else
+          :unknown
+        end
+      end
+
+      def single_statement(statements)
+        body = statements&.body
+        body && body.size == 1 && body[0]
+      end
+
       # Fold element classifications: everything provably shareable
       # gives :shareable; anything provably mutable gives
-      # :shallow_freeze; anything unknowable gives :unknown (stay
-      # silent rather than guess).
+      # :shallow_freeze; a sync primitive poisons the whole
+      # container; anything unknowable gives :unknown (stay silent
+      # rather than guess).
       def deep_classify(elements)
         verdict = :shareable
         elements.each do |element|
-          children =
-            case element
-            when Prism::AssocNode then [element.key, element.value]
-            else [element]
-            end
-          children.each do |child|
+          element_children(element).each do |child|
             case classify(child)
             when :shareable then nil
+            when :sync_primitive then return :sync_primitive
             when :unknown then return :unknown
             else verdict = :shallow_freeze
             end

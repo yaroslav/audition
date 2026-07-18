@@ -129,8 +129,10 @@ module Audition
             flag(node, :shallow_freeze, name: name,
               autofix: replace_with_make_shareable(value))
           when :sync_primitive
+            klass = value.is_a?(Prism::CallNode) &&
+              classifier.const_name(value.receiver)
             flag(node, :sync_primitive, name: name,
-              klass: classifier.const_name(value.receiver))
+              klass: klass || "sync primitive")
           when :proc
             flag(node, :proc_constant, name: name,
               autofix: wrap_make_shareable(value))
@@ -178,13 +180,26 @@ module Audition
           )
         end
 
+        # Ternaries classify as strings when both branches are;
+        # `.freeze` binds tighter than `?:`, so they get parens.
         def append_freeze(value)
-          offset = value.location.end_offset
-          Autofix.new(
-            start_offset: offset,
-            end_offset: offset,
-            replacement: ".freeze"
-          )
+          string = value.is_a?(Prism::StringNode) ||
+            value.is_a?(Prism::InterpolatedStringNode)
+          if string
+            offset = value.location.end_offset
+            Autofix.new(
+              start_offset: offset,
+              end_offset: offset,
+              replacement: ".freeze"
+            )
+          else
+            source = value.location.slice
+            Autofix.new(
+              start_offset: value.location.start_offset,
+              end_offset: value.location.end_offset,
+              replacement: "(#{source}).freeze"
+            )
+          end
         end
 
         def wrap_make_shareable(value)

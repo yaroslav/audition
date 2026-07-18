@@ -47,6 +47,10 @@ module Audition
         end
       end
 
+      # Bare literals only: `[...].freeze` is a method call, and
+      # under the magic comment Ruby raises for it at assignment
+      # because the shallowly-frozen value is unshareable
+      # (verified on 4.0 with jwt's NAMED_CURVES).
       def self.deep_literal?(node, classifier)
         case node
         when Prism::ArrayNode
@@ -60,9 +64,7 @@ module Audition
               deep_literal?(element.value, classifier)
           end
         when Prism::CallNode
-          node.name == :freeze && node.arguments.nil? &&
-            node.receiver &&
-            deep_literal?(node.receiver, classifier)
+          false
         else
           %i[shareable mutable_string]
             .include?(classifier.classify(node))
@@ -153,6 +155,13 @@ module Audition
           next if memos.empty?
           next if orphan_guards?(ops, memos)
           next if guarded_with_strays?(ops, memos)
+          # `@x ||= {}` is a lazily-built accumulator, mutated
+          # through the accessor after memoization (jwt's
+          # algorithm registry). Freezing it breaks registration
+          # and Ractor-local copies would leave other Ractors an
+          # empty registry; the copy-on-write refactor is human
+          # work, so no edit is offered.
+          next if memos.any? { |m| accumulator?(m[:op][:node].value) }
 
           if freezable?(ops, memos)
             edits.concat(freeze_edits(file, memos))
@@ -179,6 +188,11 @@ module Audition
             {op: op, guard: guard} if guard
           end
         end
+      end
+
+      def self.accumulator?(value)
+        (value.is_a?(Prism::ArrayNode) ||
+          value.is_a?(Prism::HashNode)) && value.elements.empty?
       end
 
       def self.guarded_with_strays?(ops, memos)
@@ -238,17 +252,25 @@ module Audition
         end
       end
 
+      # Plain `.freeze` only where the value is provably a string;
+      # everything unproven gets Ractor.make_shareable, which is a
+      # no-op for already-shareable values. This matters for
+      # memoized classes (multi_json memoizes adapter classes):
+      # `.freeze` on a Class freezes the class object and later
+      # ivar writes on it raise FrozenError.
       def self.freeze_value(value, kind)
         return nil if kind == :shareable
+        # Freezing or wrapping a sync primitive raises; leave the
+        # finding in place for a human.
+        return nil if kind == :sync_primitive
         return nil if frozen_call?(value)
 
         slice = value.location.slice
         replacement =
-          case kind
-          when :mutable_container, :shallow_freeze
-            "Ractor.make_shareable(#{slice})"
-          else
+          if kind == :mutable_string
             parens?(value) ? "(#{slice}).freeze" : "#{slice}.freeze"
+          else
+            "Ractor.make_shareable(#{slice})"
           end
         Autofix.new(
           start_offset: value.location.start_offset,
@@ -345,9 +367,10 @@ module Audition
         call = "Ractor.store_if_absent(#{key})"
         return "#{call} { #{value} }" unless value.include?("\n")
 
+        raw = source.dup.force_encoding(Encoding::BINARY)
         from = node.location.start_offset
-        start = from.zero? ? 0 : (source.rindex("\n", from - 1) || -1) + 1
-        indent = source[start...from]
+        start = from.zero? ? 0 : (raw.rindex("\n", from - 1) || -1) + 1
+        indent = raw[start...from].force_encoding(source.encoding)
         return "#{call} { #{value} }" unless indent.match?(/\A[ \t]*\z/)
 
         body = value.lines.map.with_index do |line, index|
@@ -367,16 +390,17 @@ module Audition
       # with a hole. Falls back to the bare node span when other
       # code shares the line.
       def self.deletion(source, node)
+        raw = source.dup.force_encoding(Encoding::BINARY)
         from = node.location.start_offset
         upto = node.location.end_offset
-        start = from.zero? ? 0 : (source.rindex("\n", from - 1) || -1) + 1
-        if source[start...from].match?(/\A[ \t]*\z/)
-          newline = source.index("\n", upto)
-          stop = newline ? newline + 1 : source.length
+        start = from.zero? ? 0 : (raw.rindex("\n", from - 1) || -1) + 1
+        if raw[start...from].match?(/\A[ \t]*\z/n)
+          newline = raw.index("\n", upto)
+          stop = newline ? newline + 1 : raw.length
           loop do
-            newline = source.index("\n", stop)
+            newline = raw.index("\n", stop)
             break unless newline
-            break unless source[stop...newline].match?(/\A[ \t]*\z/)
+            break unless raw[stop...newline].match?(/\A[ \t]*\z/n)
 
             stop = newline + 1
           end
@@ -565,7 +589,10 @@ module Audition
           next unless (ops - writes).all? { |op| op[:kind] == :read }
 
           write = writes[0][:node]
-          shareable = classifier.classify(write.value) == :shareable
+          kind = classifier.classify(write.value)
+          next if kind == :sync_primitive
+
+          shareable = kind == :shareable
           # A mutable value that would get deep-frozen must never be
           # the receiver of a call afterwards: `X[k] = v`, `X << v`
           # and friends would raise FrozenError at runtime. Reads of

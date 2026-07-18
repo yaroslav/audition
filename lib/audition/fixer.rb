@@ -105,22 +105,30 @@ module Audition
       accepted
     end
 
+    # Prism offsets are byte offsets; splicing must happen on a
+    # binary copy or every edit after the first multibyte
+    # character lands short (addressable's unicode tables were
+    # the crash test).
     def patched(plan)
-      source = plan.source.dup
+      encoding = plan.source.encoding
+      bytes = plan.source.dup.force_encoding(Encoding::BINARY)
       plan.edits.each do |edit|
-        source[edit.start_offset...edit.end_offset] =
-          edit.replacement
+        bytes[edit.start_offset...edit.end_offset] =
+          edit.replacement.dup.force_encoding(Encoding::BINARY)
       end
-      source
+      bytes.force_encoding(encoding)
     end
 
     # Edits whose line windows overlap (a guard deletion runs into
     # the write it pairs with) render as one hunk, so the preview
-    # never repeats a line in two half-applied states.
+    # never repeats a line in two half-applied states. All window
+    # math runs on a binary copy: the offsets are bytes.
     def hunks(plan)
+      encoding = plan.source.encoding
+      raw = plan.source.dup.force_encoding(Encoding::BINARY)
       groups = []
       plan.edits.sort_by(&:start_offset).each do |edit|
-        from, upto = line_window(plan.source, edit)
+        from, upto = line_window(raw, edit)
         if groups.any? && from <= groups.last[:upto]
           last = groups.last
           last[:upto] = [last[:upto], upto].max
@@ -130,30 +138,31 @@ module Audition
         end
       end
       groups.map do |group|
-        old = plan.source[group[:from]...group[:upto]]
+        old = raw[group[:from]...group[:upto]]
         updated = old.dup
         group[:edits].reverse_each do |edit|
           span = ((edit.start_offset - group[:from])...
                   (edit.end_offset - group[:from]))
-          updated[span] = edit.replacement
+          updated[span] =
+            edit.replacement.dup.force_encoding(Encoding::BINARY)
         end
         {
-          line: plan.source[0, group[:from]].count("\n") + 1,
-          old: old,
-          new: updated.chomp
+          line: raw[0, group[:from]].count("\n") + 1,
+          old: old.force_encoding(encoding),
+          new: updated.chomp.force_encoding(encoding)
         }
       end
     end
 
-    def line_window(source, edit)
+    def line_window(raw, edit)
       from =
         if edit.start_offset.zero?
           0
         else
-          before = source.rindex("\n", edit.start_offset - 1)
+          before = raw.rindex("\n", edit.start_offset - 1)
           before ? before + 1 : 0
         end
-      upto = source.index("\n", edit.end_offset) || source.length
+      upto = raw.index("\n", edit.end_offset) || raw.length
       [from, upto]
     end
   end
