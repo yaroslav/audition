@@ -3,18 +3,21 @@
 Point it at a Ruby script, a gem, a Rack app, or a Rails root and it
 tells you whether that code can run inside Ractors, why it cannot,
 and how to fix it. Unlike a linter, audition does not stop at
-pattern-matching your source: it also loads the target in a
-sandboxed subprocess and observes real `Ractor::IsolationError`s on
-the live object graph.
+pattern-matching your source: whole-program analysis is powered by
+[rubydex](https://github.com/Shopify/rubydex), Shopify's Rust-native
+Ruby indexer, and the target is also loaded in a sandboxed
+subprocess to observe real `Ractor::IsolationError`s on the live
+object graph.
 
 [![GitHub Release](https://img.shields.io/github/v/release/yaroslav/audition)](https://github.com/yaroslav/audition/releases)
 [![Docs](https://img.shields.io/badge/yard-docs-blue.svg)](https://rubydoc.info/gems/audition)
 
 - **Three probes, one verdict.** Per-file Prism AST checks,
-  whole-program semantic analysis on the
-  [rubydex](https://github.com/Shopify/rubydex) graph (class-level
-  state is resolved across files and reopenings), and dynamic
-  in-Ractor execution of the actual target.
+  whole-program semantic analysis powered by
+  [rubydex](https://github.com/Shopify/rubydex) (Shopify's
+  Rust-native code graph; class-level state is resolved across
+  files and reopenings), and dynamic in-Ractor execution of the
+  actual target.
 - **Explains, not just flags.** Every finding carries a `why`
   (which rule of the Ractor model it violates) and a `fix`
   (what to write instead).
