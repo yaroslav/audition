@@ -1,10 +1,27 @@
-# How Rails ractorizes: fix patterns from its own history
+# Rails core best practices for Ractor safety
 
 A study of the Rails ractorization effort (led by Shopify, landing
-on `main` for Rails 8.2). Source: 103 substantive commits matching
-`ractor` in the message or touching a `Ractor` symbol, analyzed
-from the Rails repo history in mid-2026. Commit SHAs below refer to
-rails/rails.
+on `main` for Rails 8.2). Commit SHAs below refer to rails/rails.
+
+## Methodology
+
+Compiled on 2026-07-19 from a local rails/rails checkout at
+8.2.0.alpha (`main`, HEAD cba6112015). Commit selection:
+
+- `git log -i --grep=ractor`: 153 commits mentioning ractor in
+  the message.
+- `git log -S Ractor`: 57 commits adding or removing a `Ractor`
+  symbol in code (pickaxe).
+- Union: 161 unique commits; 103 after dropping merge commits.
+
+Each of the 103 commits was read (`git show --stat -p`) and
+classified by the root problem it fixed and the technique it
+applied; about a quarter turned out to be file-history noise
+unrelated to Ractors (mostly `source_annotation_extractor.rb`
+churn) and was discarded. Roughly 75 substantive fixes remain and
+back the patterns below. The analysis was performed by Claude
+(Fable 5) with four parallel readers over commit slices; treat
+SHAs as verified, prose as interpretation.
 
 The one-line summary: freeze everything you can at boot, delete
 lazy state instead of guarding it, prefer plain Ruby over wrapping
