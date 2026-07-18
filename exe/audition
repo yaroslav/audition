@@ -1,6 +1,14 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+# When run from a source checkout, prefer the sibling lib over any
+# installed audition gem; installed binstubs never hit this branch
+# because their lib is where they load from anyway.
+lib = File.expand_path("../lib", __dir__)
+if File.file?(File.join(lib, "audition.rb"))
+  $LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
+end
+
 require "audition"
 
 exit Audition::CLI.run(ARGV)
