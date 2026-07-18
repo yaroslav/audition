@@ -3,12 +3,19 @@
 ## [0.2.0] - Unreleased
 
 - Class-level memoization fixes recognize both idioms (`@x ||=`
-  and `return @x if defined?(@x)`) and prefer plain Ruby with no
-  Ractor-specific APIs: cheap deterministic values are de-memoized
-  in place, with stray reads redirected to the memoizing method.
+  and `return @x if defined?(@x)`) and apply freeze-on-memoize,
+  the Rails-core pattern: the memoization stays exactly as
+  written and only the memoized value becomes shareable
+  (`.freeze`, or `Ractor.make_shareable` for containers).
   `Ractor.store_if_absent` remains the fallback for initializers
-  with blocks and is emitted as an indented `do..end` block when
-  the value spans lines.
+  with blocks and invalidated caches, emitted as an indented
+  `do..end` block when the value spans lines.
+- Frozen memoization is recognized as a pattern, not punished:
+  the class-level-state check and the runtime sweep downgrade
+  class state that holds only shareable values to an info note
+  telling you to warm the cache at boot. Info notes no longer
+  taint the verdict; a target with only info findings is
+  `ready`.
 - `--dry-run` previews render touching edits as a single hunk
   instead of repeating a line in two half-applied states.
 - New checks trained on the Rails core ractorization effort

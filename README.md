@@ -27,16 +27,21 @@ core itself is being ractorized; see the
   `.freeze` on string constants, `Ractor.make_shareable(...)` for
   mutable and shallow-frozen containers and Proc constants, and
   boot-time hoisting of method-body requires. `--fix-unsafe` adds
-  semantics-affecting rewrites: magic-comment insertion, class
-  memoization unwound to plain Ruby (both `@x ||=` and
-  `return @x if defined?(@x)` idioms; `Ractor.store_if_absent`
-  only when a block initializer forces it), `autoload` to
-  `require`, and write-once globals/class variables to frozen
-  constants. `--dry-run` previews everything as a diff.
+  semantics-affecting rewrites: magic-comment insertion,
+  freeze-on-memoize for class-level memoization (both `@x ||=`
+  and `return @x if defined?(@x)` idioms keep their caching, the
+  memoized value becomes shareable, Rails-core style;
+  `Ractor.store_if_absent` only for block initializers and
+  invalidated caches), `autoload` to `require`, and write-once
+  globals/class variables to frozen constants. `--dry-run`
+  previews everything as a diff.
 - **Dependency-aware.** Runtime findings are attributed to their
   source via `const_source_location`; when your own code is clean
   but a dependency is not, the verdict is a distinct `blocked`
   state, so `globalid` is not blamed for ActiveSupport's state.
+- **Dogfooding.** The scanner for Ractor compatibility is built
+  using Ractors: static analysis fans out across CPU cores on
+  Ractor workers, and audition passes its own audit.
 - **Trained on Rails core.** Several checks and fix suggestions
   come straight from studying the Rails ractorization effort
   (about 75 substantive commits): `Hash.new` default procs,

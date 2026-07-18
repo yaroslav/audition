@@ -51,6 +51,63 @@ RSpec.describe Audition::Static::GraphAudit do
     expect(state.first.fix).to include("store_if_absent")
   end
 
+  it "downgrades frozen memoization to an info note" do
+    findings = findings_for(
+      "platform.rb" => <<~RUBY
+        module Platform
+          class << self
+            def windows?
+              return @windows if defined?(@windows)
+
+              @windows = RUBY_PLATFORM.match?(/mswin/).freeze
+            end
+          end
+        end
+      RUBY
+    )
+
+    expect(findings.size).to eq(1)
+    note = findings.first
+    expect(note.severity).to eq(:info)
+    expect(note.message).to include("frozen memoization")
+    expect(note.fix).to include("boot")
+  end
+
+  it "keeps unfrozen memoization an error" do
+    findings = findings_for(
+      "cache.rb" => <<~RUBY
+        module Cache
+          def self.store
+            return @store if defined?(@store)
+
+            @store = {}
+          end
+        end
+      RUBY
+    )
+
+    expect(findings.size).to eq(1)
+    expect(findings.first.severity).to eq(:error)
+  end
+
+  it "keeps frozen memoization an error when a reset write exists" do
+    findings = findings_for(
+      "resettable.rb" => <<~RUBY
+        module Registry
+          def self.all
+            return @all if defined?(@all)
+
+            @all = compute.freeze
+          end
+
+          def self.reset! = (@all = nil)
+        end
+      RUBY
+    )
+
+    expect(findings).to all(have_attributes(severity: :error))
+  end
+
   it "does not flag instance-level ivars" do
     findings = findings_for(
       "a.rb" => "class A\n  def x = (@ok = 1)\nend\n"

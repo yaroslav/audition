@@ -92,8 +92,9 @@ RSpec.describe Audition::CLI do
       status, out, = run(path, "--fix-unsafe", "--static-only")
 
       content = File.read(path)
-      expect(content).to include('def self.config = ({ "a" => 1 })')
-      expect(content).not_to include("@config")
+      expect(content).to include(
+        '@config ||= Ractor.make_shareable({ "a" => 1 })'
+      )
       expect(out).to include("fixed 1")
       expect(status).to eq(0)
     end

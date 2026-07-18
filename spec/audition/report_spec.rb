@@ -38,6 +38,11 @@ RSpec.describe Audition::Report do
       expect(report_for(findings).verdict).to eq(:risky)
     end
 
+    it "is ready when only info notes exist" do
+      findings = [finding(severity: :info)]
+      expect(report_for(findings).verdict).to eq(:ready)
+    end
+
     it "is blocked when only dependencies have errors" do
       findings = [finding(dependency: true),
         finding(severity: :warning)]

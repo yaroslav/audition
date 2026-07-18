@@ -86,6 +86,34 @@ RSpec.describe Audition::Dynamic::Prober do
         expect(messages.grep(/SAFE/)).to be_empty
       end
     end
+
+    it "notes shareable class-level state at info level" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/warmed_lib.rb", <<~RUBY)
+          module WarmedLib
+            def self.windows?
+              return @windows if defined?(@windows)
+
+              @windows = RUBY_PLATFORM.match?(/mswin/).freeze
+            end
+            windows?
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "warmed_lib",
+          load_paths: [File.join(dir, "lib")]
+        )
+
+        state = result.findings.select do |f|
+          f.check == "runtime-class-state"
+        end
+        expect(state.size).to eq(1)
+        expect(state.first.severity).to eq(:info)
+        expect(state.first.why).to include("shareable")
+      end
+    end
   end
 
   describe "dependency attribution" do

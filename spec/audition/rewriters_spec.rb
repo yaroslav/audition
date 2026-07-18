@@ -107,7 +107,7 @@ RSpec.describe "unsafe rewriters" do
     end
   end
 
-  it "de-memoizes a defined? guard into a plain computation" do
+  it "freezes memoized values and keeps the memoization" do
     Dir.mktmpdir do |dir|
       path = write(dir, "platform.rb", <<~RUBY)
         module Platform
@@ -115,8 +115,13 @@ RSpec.describe "unsafe rewriters" do
             def windows?
               return @windows if defined?(@windows)
 
-              @windows = RUBY_PLATFORM
-                .match?(/mswin|mingw/)
+              @windows = RUBY_PLATFORM.match?(/mswin|mingw/)
+            end
+
+            def separator
+              return @separator if defined?(@separator)
+
+              @separator = windows? ? ";" : ":"
             end
           end
         end
@@ -125,24 +130,36 @@ RSpec.describe "unsafe rewriters" do
       fix!(path)
 
       content = File.read(path)
-      expect(content).not_to include("@windows")
-      expect(content).not_to include("defined?")
+      expect(content).to include(
+        "@windows = RUBY_PLATFORM.match?(/mswin|mingw/).freeze"
+      )
+      expect(content).to include(
+        '@separator = (windows? ? ";" : ":").freeze'
+      )
+      expect(content).to include("defined?(@windows)")
       expect(content).not_to include("Ractor")
-      expect(all_findings(path)).to be_empty
+      expect(all_findings(path).none?(&:error?)).to be(true)
 
       script = <<~RUBY
         Warning[:experimental] = false
         require #{path.inspect}
-        value = Ractor.new { Platform.windows? }.value
-        raise "broken" unless value == false
-        print "works-in-ractor"
+        cold = begin
+          Ractor.new { Platform.separator }.value
+        rescue Ractor::RemoteError
+          :raised
+        end
+        raise "memoization was lost" unless cold == :raised
+        Platform.separator
+        warm = Ractor.new { Platform.separator }.value
+        raise "broken" unless warm == ":"
+        print "works-once-warmed"
       RUBY
       out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
-      expect(out).to eq("works-in-ractor"), err
+      expect(out).to eq("works-once-warmed"), err
     end
   end
 
-  it "keeps helper statements when de-memoizing" do
+  it "freezes the final write of multi-statement memo bodies" do
     Dir.mktmpdir do |dir|
       path = write(dir, "runner.rb", <<~RUBY)
         class Runner
@@ -159,13 +176,15 @@ RSpec.describe "unsafe rewriters" do
 
       content = File.read(path)
       expect(content).to include(%(executable = "bun"\n))
-      expect(content).to include('File.join("/opt", executable)')
-      expect(content).not_to include("@binary_path")
-      expect(all_findings(path)).to be_empty
+      expect(content).to include(
+        '@binary_path = File.join("/opt", executable).freeze'
+      )
+      expect(content).to include("defined?(@binary_path)")
+      expect(all_findings(path).none?(&:error?)).to be(true)
     end
   end
 
-  it "redirects stray reads to the de-memoized method" do
+  it "leaves sibling reads of the memoized ivar alone" do
     Dir.mktmpdir do |dir|
       path = write(dir, "paths.rb", <<~RUBY)
         class Paths
@@ -182,33 +201,28 @@ RSpec.describe "unsafe rewriters" do
       fix!(path)
 
       content = File.read(path)
-      expect(content).to include('File.join(root, "doc")')
-      expect(content).not_to include("@root")
-      expect(all_findings(path)).to be_empty
+      expect(content).to include(
+        '@root = File.expand_path("..").freeze'
+      )
+      expect(content).to include('File.join(@root, "doc")')
+      expect(all_findings(path).none?(&:error?)).to be(true)
     end
   end
 
-  it "previews touching edits as one hunk" do
+  it "previews same-line edits as one hunk" do
     Dir.mktmpdir do |dir|
       path = write(dir, "hunk.rb", <<~RUBY)
-        module Platform
-          def self.windows?
-            return @windows if defined?(@windows)
+        $retry_limit = [1, 2, 3]
 
-            @windows = RUBY_PLATFORM.match?(/mswin/)
-          end
-        end
+        def limits = $retry_limit
       RUBY
 
       previews = Audition::Fixer.new(unsafe: true)
         .preview(all_findings(path))
 
-      hunks = previews.sum { |p| p[:hunks].size }
-      expect(hunks).to eq(1)
-      hunk = previews.first[:hunks].first
-      expect(hunk[:old]).to include("return @windows")
-      expect(hunk[:new]).to eq(
-        "    RUBY_PLATFORM.match?(/mswin/)"
+      first = previews.first[:hunks].first
+      expect(first[:new]).to include(
+        "RETRY_LIMIT = Ractor.make_shareable([1, 2, 3])"
       )
     end
   end

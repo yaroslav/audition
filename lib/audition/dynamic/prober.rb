@@ -201,21 +201,33 @@ module Audition
         findings
       end
 
+      # Class-level state holding only shareable values is the
+      # warmed frozen-memoization shape: reads are legal from any
+      # Ractor, so it rates an info note; unshareable values are
+      # hard errors.
       def class_state_finding(entry, label)
         unshareable = entry.fetch("unshareable", [])
         hot = unshareable.any?
         detail =
           hot ? " (unshareable: #{unshareable.join(", ")})" : ""
+        why =
+          if hot
+            "Writes raise Ractor::IsolationError from non-main " \
+            "Ractors; reads raise too while the value is " \
+            "unshareable. #{RUNTIME_WHY}"
+          else
+            "Every value observed here is shareable, so reads " \
+            "from non-main Ractors are legal; only late writes " \
+            "would raise Ractor::IsolationError. #{RUNTIME_WHY}"
+          end
         runtime_finding(
           entry, label,
           check: "runtime-class-state",
-          severity: hot ? :error : :warning,
+          severity: hot ? :error : :info,
           message: "class-level state " \
                    "#{entry["ivars"].join(", ")} on " \
                    "#{entry["const"]}#{detail}",
-          why: "Writes raise Ractor::IsolationError from non-main " \
-               "Ractors; reads raise too while the value is " \
-               "unshareable. #{RUNTIME_WHY}",
+          why: why,
           fix: "Precompute and freeze at load, use " \
                "Ractor.store_if_absent, or keep per-Ractor state."
         )

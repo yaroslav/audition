@@ -88,13 +88,16 @@ module Audition
     #   @x ||= expr
     #   return @x if defined?(@x); @x = expr
     #
-    # Preferred strategy is de-memoization, plain Ruby with no
-    # Ractor-specific APIs: the guard line is deleted, the write
-    # prefix is stripped so the method recomputes its value, and
-    # stray reads in sibling singleton methods become calls to the
-    # memoizing method. Chosen when the value expression carries no
-    # block (a proxy for one-time side effects), there is a single
-    # memo site, and no other writes exist.
+    # Preferred strategy is freeze-on-memoize, the pattern Rails
+    # core applies to its own code: the memoization stays exactly
+    # as written and only the memoized value becomes shareable
+    # (`.freeze` appended; Ractor.make_shareable for containers).
+    # Non-main Ractors may then read the ivar once it has been
+    # computed; the first write must still happen on the main
+    # Ractor, which is a boot-warming concern the static check
+    # reports as an info note. Chosen when the value expression
+    # carries no block (a proxy for one-time side effects) and no
+    # writes exist outside the memo sites.
     #
     # Otherwise falls back to Ractor-local storage:
     #   @x ||= expr   ->  Ractor.store_if_absent(:"Klass/@x") { expr }
@@ -103,9 +106,9 @@ module Audition
     #
     # Only when every reference in singleton scope is visible in
     # this file, none sit directly in the class body, and no
-    # compound writes exist. Caveat (why this is unsafe): the
-    # de-memoized method returns a fresh object per call, and each
-    # Ractor computes its own copy under store_if_absent.
+    # compound writes exist. Caveat (why this is unsafe): freezing
+    # changes value mutability, and each Ractor computes its own
+    # copy under store_if_absent.
     module Memoization
       def self.plan(file, findings)
         return [] if findings.none? { |f| f.check == "class-level-state" }
@@ -124,8 +127,8 @@ module Audition
           next if memos.empty?
           next if orphan_guards?(ops, memos)
 
-          if dememoizable?(ops, memos)
-            edits.concat(plain_edits(file, ops, memos))
+          if freezable?(ops, memos)
+            edits.concat(freeze_edits(file, memos))
           else
             key = %(:"#{namespace}/#{name}")
             edits.concat(ractor_edits(file, ops, memos, key))
@@ -162,18 +165,15 @@ module Audition
         end
       end
 
-      def self.dememoizable?(ops, memos)
-        return false unless memos.size == 1
-
-        memo = memos.first
-        return false unless blockless?(memo[:op][:node].value)
-
+      # Freeze-on-memoize applies when every write is a memo site
+      # (a stray write means cache invalidation; frozen values
+      # cannot support that) and no value needs a block to build.
+      def self.freezable?(ops, memos)
+        memo_ops = memos.map { |memo| memo[:op] }
         writes = ops.select { |op| op[:kind] == :write }
-        stray_writes = writes.reject { |w| w.equal?(memo[:op]) }
-        return false unless stray_writes.empty?
+        return false unless (writes - memo_ops).empty?
 
-        reads = ops.select { |op| op[:kind] == :read }
-        reads.none? { |r| r[:def_id] == memo[:op][:def_id] }
+        memos.all? { |memo| blockless?(memo[:op][:node].value) }
       end
 
       def self.blockless?(node)
@@ -189,30 +189,59 @@ module Audition
         true
       end
 
-      def self.plain_edits(file, ops, memos)
-        memo = memos.first
-        edits = []
-        if memo[:guard]
-          edits << deletion(file.source, memo[:guard][:node])
+      # One edit per memo site: make the memoized value shareable
+      # while leaving the memoization intact. Guards, sibling
+      # reads, and method shapes stay untouched.
+      def self.freeze_edits(file, memos)
+        classifier = Static::LiteralClassifier.new(
+          frozen_string_literal: file.frozen_string_literal?
+        )
+        memos.filter_map do |memo|
+          value = memo[:op][:node].value
+          freeze_value(value, classifier.classify(value))
         end
-        node = memo[:op][:node]
-        edits << Autofix.new(
-          start_offset: node.location.start_offset,
-          end_offset: node.location.end_offset,
-          replacement: node.value.location.slice,
+      end
+
+      def self.freeze_value(value, kind)
+        return nil if kind == :shareable
+        return nil if frozen_call?(value)
+
+        slice = value.location.slice
+        replacement =
+          case kind
+          when :mutable_container, :shallow_freeze
+            "Ractor.make_shareable(#{slice})"
+          else
+            parens?(value) ? "(#{slice}).freeze" : "#{slice}.freeze"
+          end
+        Autofix.new(
+          start_offset: value.location.start_offset,
+          end_offset: value.location.end_offset,
+          replacement: replacement,
           safety: :unsafe
         )
-        method_name = memo[:op][:def_name].to_s
-        ops.select { |op| op[:kind] == :read }.each do |op|
-          read = op[:node]
-          edits << Autofix.new(
-            start_offset: read.location.start_offset,
-            end_offset: read.location.end_offset,
-            replacement: method_name,
-            safety: :unsafe
-          )
+      end
+
+      def self.frozen_call?(value)
+        value.is_a?(Prism::CallNode) &&
+          value.name == :freeze &&
+          value.receiver && value.arguments.nil?
+      end
+
+      # `.freeze` binds tighter than operators and ternaries, so
+      # compound expressions get wrapped; message sends and plain
+      # literals do not need it.
+      def self.parens?(value)
+        case value
+        when Prism::CallNode
+          !value.name.to_s.match?(/\A[a-z_]/i)
+        when Prism::StringNode, Prism::InterpolatedStringNode,
+             Prism::ArrayNode, Prism::HashNode,
+             Prism::ConstantReadNode, Prism::ConstantPathNode
+          false
+        else
+          true
         end
-        edits
       end
 
       def self.ractor_edits(file, ops, memos, key)

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "rubydex"
+require_relative "../rewriters"
 
 module Audition
   module Static
@@ -34,6 +35,19 @@ module Audition
         "last resort use Ractor.store_if_absent for lazy " \
         "initialization or per-Ractor state in " \
         "Ractor.current[:key]."
+      FROZEN_MEMO_WHY =
+        "Every write memoizes a shareable (frozen) value, so " \
+        "non-main Ractors can read it once it has been " \
+        "computed; only the first write must happen on the " \
+        "main Ractor, or it raises Ractor::IsolationError. " \
+        "This is the pattern Rails core uses for its own " \
+        "memoized class state."
+      FROZEN_MEMO_FIX =
+        "Warm the cache at boot, before spawning Ractors: call " \
+        "the memoizing method from an initializer or on_load " \
+        "hook. If the value genuinely must be computed at " \
+        "runtime, proxy the write to the main Ractor or use " \
+        "Ractor.store_if_absent."
 
       # @param sources [Hash{String => String}] path => source
       # @return [Array<Finding>]
@@ -43,6 +57,7 @@ module Audition
           graph.index_source(path, code, "ruby")
         end
         @sources = sources
+        @frozen_memos = frozen_memo_map(sources)
         audit(graph)
       end
 
@@ -96,15 +111,28 @@ module Audition
 
         variable = decl.name.split("#").last
         owner = display_owner(decl.owner)
+        frozen = @frozen_memos["#{owner}/#{variable}"] == :frozen
         each_local_definition(decl).map do |defn|
-          finding_at(
-            defn,
-            check: "class-level-state",
-            message: "class-level instance variable #{variable} " \
-                     "on #{owner}",
-            why: STATE_WHY,
-            fix: STATE_FIX
-          )
+          if frozen
+            finding_at(
+              defn,
+              check: "class-level-state",
+              severity: :info,
+              message: "frozen memoization #{variable} on " \
+                       "#{owner}; warm it on the main Ractor",
+              why: FROZEN_MEMO_WHY,
+              fix: FROZEN_MEMO_FIX
+            )
+          else
+            finding_at(
+              defn,
+              check: "class-level-state",
+              message: "class-level instance variable " \
+                       "#{variable} on #{owner}",
+              why: STATE_WHY,
+              fix: STATE_FIX
+            )
+          end
         end
       end
 
@@ -114,12 +142,13 @@ module Audition
         end
       end
 
-      def finding_at(defn, check:, message:, why:, fix:)
+      def finding_at(defn, check:, message:, why:, fix:,
+        severity: :error)
         path = path_from_uri(defn.location.uri)
         line = defn.location.start_line + 1
         Finding.new(
           check: check,
-          severity: :error,
+          severity: severity,
           message: message,
           why: why,
           fix: fix,
@@ -127,6 +156,56 @@ module Audition
           line: line,
           source: source_line(path, line)
         )
+      end
+
+      # Frozen memoization, the shape Rails core ships: every
+      # write to the ivar is a memo site (`@x ||=` or a defined?
+      # guard) whose value is provably shareable, either a frozen
+      # literal, an explicit `.freeze` or make_shareable call.
+      # Such state is read-safe from any Ractor once warmed, so
+      # the finding downgrades to an info note. Any stray write
+      # or unproven value keeps the error. Keys are
+      # "Owner::Path/@name"; a dirty verdict in any file wins.
+      def frozen_memo_map(sources)
+        map = {}
+        sources.each do |path, code|
+          file = SourceFile.new(source: code, path: path)
+          next unless file.valid_syntax?
+
+          collector = Rewriters::Memoization::SingletonIvars.new
+          collector.visit(file.root)
+          classifier = LiteralClassifier.new(
+            frozen_string_literal: file.frozen_string_literal?
+          )
+          collector.groups.each do |(namespace, name), ops|
+            key = "#{namespace}/#{name}"
+            verdict =
+              group_frozen?(ops, classifier) ? :frozen : :dirty
+            map[key] =
+              (map[key] == :dirty) ? :dirty : verdict
+          end
+        end
+        map
+      end
+
+      def group_frozen?(ops, classifier)
+        return false if ops.any? { |op| op[:body] }
+        return false if ops.any? { |op| op[:kind] == :other }
+
+        memos = Rewriters::Memoization.memo_sites(ops)
+        return false if memos.empty?
+        return false if
+          Rewriters::Memoization.orphan_guards?(ops, memos)
+
+        memo_ops = memos.map { |memo| memo[:op] }
+        writes = ops.select { |op| op[:kind] == :write }
+        return false unless (writes - memo_ops).empty?
+
+        memos.all? do |memo|
+          value = memo[:op][:node].value
+          Rewriters::Memoization.frozen_call?(value) ||
+            classifier.classify(value) == :shareable
+        end
       end
 
       # "Payments::<Payments>" reads as noise; show "Payments".

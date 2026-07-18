@@ -110,9 +110,10 @@ module Audition
       return :not_ready if own_errors?
       return :blocked if dependency_errors? ||
         dynamic_results.any? { |r| !r.passed }
-      return :risky if counts[:warning].positive? ||
-        counts[:info].positive?
+      return :risky if counts[:warning].positive?
 
+      # Info notes describe things that work on Ruby 4.0 and are
+      # only worth knowing; they do not taint the verdict.
       :ready
     end
 
