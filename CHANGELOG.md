@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 2026-07-19
 
 - Class-level memoization fixes recognize both idioms (`@x ||=`
   and `return @x if defined?(@x)`) and apply freeze-on-memoize,
