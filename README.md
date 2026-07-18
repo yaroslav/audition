@@ -108,7 +108,6 @@ proxying) and its verified semantics.
 - [Usage](#usage)
 - [Adopting incrementally](#adopting-incrementally)
 - [What it catches](#what-it-catches)
-- [Field notes](#field-notes)
 - [Extending](#extending)
 - [Development](#development)
 - [License](#license)
@@ -240,21 +239,6 @@ Dynamic, on the live object graph:
   under concurrency.
 - Boots Rails (`config/environment.rb`), eager-loads, and sweeps
   the application's namespaces.
-
-## Field notes
-
-Findings from running audition on popular gems (July 2026,
-Ruby 4.0.6):
-
-- **rack 3.2**: `Rack::Builder.parse_file` cannot run inside a
-  Ractor at all; `Rack::BUILDER_TOPLEVEL_BINDING` holds an
-  unshareable Binding. audition's own rack probe rebuilds the app
-  with `Rack::Builder.new` + `instance_eval` to get around it.
-- **mail 2.9**: 28 hard findings, including `@@maximum_amount`,
-  `@@autoloads`, and unfrozen table constants like `FIELDS_MAP`.
-- **globalid 1.3**: only 6 findings of its own; the rest of its
-  report is ActiveSupport state, attributed as dependency errors
-  in the summary.
 
 ## Extending
 
