@@ -23,7 +23,9 @@ the live object graph.
   mutable and shallow-frozen containers and Proc constants, and
   boot-time hoisting of method-body requires. `--fix-unsafe` adds
   semantics-affecting rewrites: magic-comment insertion, class
-  memoization to `Ractor.store_if_absent`, `autoload` to
+  memoization unwound to plain Ruby (both `@x ||=` and
+  `return @x if defined?(@x)` idioms; `Ractor.store_if_absent`
+  only when a block initializer forces it), `autoload` to
   `require`, and write-once globals/class variables to frozen
   constants. `--dry-run` previews everything as a diff.
 - **Dependency-aware.** Runtime findings are attributed to their
@@ -191,7 +193,7 @@ Static, with file:line precision:
 - **Class variables**, resolved on the rubydex graph.
 - **Class-level instance variables**, unified across the class
   body, `def self.`, and `class << self`, across files; the classic
-  `@cache ||= {}` memoization.
+  `@cache ||= {}` and `return @x if defined?(@x)` memoizations.
 - **Constants that are not deeply shareable**: bare mutable
   literals, interpolated strings, and the subtle shallow freeze
   (`[[1], [2]].freeze` still raises; audition explains why).
