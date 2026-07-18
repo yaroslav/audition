@@ -93,7 +93,7 @@ module Audition
             visit_local_variable_and_write_node
             visit_local_variable_target_node
           ].each do |method|
-            define_method(method) do |node|
+            define_method(method) do |node| # audition:disable unsafe-calls
               @names << node.name.to_s if node.depth > @level
               super(node)
             end

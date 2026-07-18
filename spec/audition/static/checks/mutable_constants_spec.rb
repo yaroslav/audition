@@ -58,6 +58,51 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     expect(findings).to be_empty
   end
 
+  it "flags Hash.new with a default proc, even frozen" do
+    findings = findings_for(<<~RUBY)
+      TABLE = Hash.new { |h, k| h[k] = [] }
+      EMPTY = Hash.new { "" }.freeze
+    RUBY
+
+    expect(findings.map(&:line)).to eq([1, 2])
+    expect(findings).to all(have_attributes(severity: :error))
+    expect(findings.first.message).to include("default proc")
+    expect(findings.first.fix).to include("explicit")
+  end
+
+  it "classifies bare Hash.new and Array.new as mutable" do
+    findings = findings_for(<<~RUBY)
+      CACHE = Hash.new
+      SLOTS = Array.new(3)
+    RUBY
+
+    expect(findings.size).to eq(2)
+    expect(findings.first.message).to include("mutable")
+  end
+
+  it "flags in-place mutation of screaming-case constants" do
+    findings = findings_for(<<~RUBY)
+      RENDERERS << :json
+      LOOKUP["get"] = :get
+      Config::DEFAULTS.merge!(a: 1)
+    RUBY
+
+    expect(findings.map(&:line)).to eq([1, 2, 3])
+    expect(findings).to all(have_attributes(severity: :warning))
+    expect(findings.first.message).to include("RENDERERS")
+    expect(findings.first.fix).to include("freeze")
+  end
+
+  it "leaves mutator-named calls on class constants alone" do
+    findings = findings_for(<<~RUBY)
+      Registry.push(:item)
+      User << record
+      LOOKUP.fetch(:get)
+    RUBY
+
+    expect(findings).to be_empty
+  end
+
   it "still flags interpolated strings under frozen_string_literal" do
     findings = findings_for(<<~'RUBY')
       # frozen_string_literal: true

@@ -11,6 +11,14 @@
   the value spans lines.
 - `--dry-run` previews render touching edits as a single hunk
   instead of repeating a line in two half-applied states.
+- New checks trained on the Rails core ractorization effort
+  (documented in docs/rails_core_best_practices.md): `Hash.new`
+  with a default proc (the block survives `.freeze`), in-place
+  mutation of screaming-case constants (`RENDERERS << key`), and
+  `define_method` with a literal block (the method carries an
+  unshareable Proc). Class-level state advice now teaches the
+  Rails copy-on-write idiom: rebuild and refreeze on write, and
+  compute per-subclass values in the `inherited` hook.
 
 ## [0.1.0] - 2026-07-18
 

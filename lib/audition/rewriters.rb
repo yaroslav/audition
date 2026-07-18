@@ -74,7 +74,7 @@ module Audition
           visit_constant_path_write_node
           visit_constant_path_or_write_node
         ].each do |method|
-          define_method(method) do |node|
+          define_method(method) do |node| # audition:disable unsafe-calls
             @values << node.value
             super(node)
           end
@@ -377,7 +377,7 @@ module Audition
           visit_instance_variable_and_write_node: :other,
           visit_instance_variable_target_node: :other
         }.each do |method, kind|
-          define_method(method) do |node|
+          define_method(method) do |node| # audition:disable unsafe-calls
             record(node, kind, node.name)
             super(node)
           end
@@ -621,14 +621,14 @@ module Audition
         }.freeze
 
         GVAR_NODES.each do |method, kind|
-          define_method(method) do |node|
+          define_method(method) do |node| # audition:disable unsafe-calls
             record_gvar(node, kind) if @mode == :gvar
             super(node)
           end
         end
 
         CVAR_NODES.each do |method, kind|
-          define_method(method) do |node|
+          define_method(method) do |node| # audition:disable unsafe-calls
             record_cvar(node, kind) if @mode == :cvar
             super(node)
           end

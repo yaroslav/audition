@@ -7,7 +7,9 @@ pattern-matching your source: whole-program analysis is powered by
 [rubydex](https://github.com/Shopify/rubydex), Shopify's Ruby
 indexer, and the target is also loaded in a sandboxed subprocess
 to observe real `Ractor::IsolationError`s on the live object
-graph.
+graph. Some of the checks and fixes were trained on how Rails
+core itself is being ractorized; see the
+[pattern study](docs/rails_core_best_practices.md).
 
 [![GitHub Release](https://img.shields.io/github/v/release/yaroslav/audition)](https://github.com/yaroslav/audition/releases)
 [![Docs](https://img.shields.io/badge/yard-docs-blue.svg)](https://rubydoc.info/gems/audition)
@@ -35,6 +37,13 @@ graph.
   source via `const_source_location`; when your own code is clean
   but a dependency is not, the verdict is a distinct `blocked`
   state, so `globalid` is not blamed for ActiveSupport's state.
+- **Trained on Rails core.** Several checks and fix suggestions
+  come straight from studying the Rails ractorization effort
+  (about 75 substantive commits): `Hash.new` default procs,
+  in-place mutation of registry constants, closure-carrying
+  `define_method`, copy-on-write rewrites. The findings are
+  documented in
+  [docs/rails_core_best_practices.md](docs/rails_core_best_practices.md).
 - **Terminal-native output.** Colors, glyphs, and OSC 8 hyperlinks;
   `path:line` is clickable in supporting terminals. JSON output for
   CI.
@@ -203,7 +212,12 @@ Static, with file:line precision:
   Honors `# frozen_string_literal:` and
   `# shareable_constant_value:` magic comments.
 - **Sync primitives and Procs in constants** (Mutex, Queue,
-  lambdas).
+  lambdas), including `Hash.new { }` default procs, which stay
+  unshareable even after `.freeze`.
+- **Registry-style constant mutation** (`RENDERERS << key`,
+  `LOOKUP[k] = v`) and **`define_method` with a literal block**
+  (the method carries an unshareable Proc); both patterns and
+  their fixes come from the Rails core ractorization study.
 - **Runtime require and autoload** (serializes all Ractors through
   the main-Ractor proxy).
 - **`Ractor.new` blocks capturing outer locals** (the ArgumentError

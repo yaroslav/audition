@@ -7,10 +7,12 @@ module Audition
     # Classifies a Prism expression node by Ractor shareability:
     #   :shareable         proven deeply shareable
     #   :mutable_string    unfrozen String literal
-    #   :mutable_container Array/Hash literal
+    #   :mutable_container Array/Hash literal or constructor
     #   :shallow_freeze    frozen container with mutable elements
     #   :sync_primitive    Mutex/Queue/... constructor
     #   :proc              lambda or proc
+    #   :default_proc      Hash.new with a block; the block
+    #                      survives .freeze and stays unshareable
     #   :unknown           cannot tell statically
     class LiteralClassifier
       SYNC_PRIMITIVES = %w[
@@ -92,6 +94,13 @@ module Audition
           name = const_name(receiver)
           return :sync_primitive if SYNC_PRIMITIVES.include?(name)
           return :shareable if SHAREABLE_FACTORIES.include?(name)
+          # Hash.new retains its block as the default proc;
+          # Array.new only uses its block to build elements.
+          return :default_proc if name == "Hash" && node.block
+
+          if %w[Hash Array].include?(name)
+            return :mutable_container
+          end
 
           :unknown
         when :define
@@ -113,6 +122,9 @@ module Audition
           :shareable
         when Prism::ArrayNode, Prism::HashNode
           deep_classify(receiver.elements)
+        when Prism::CallNode
+          # A default proc survives freezing the Hash.
+          (classify(receiver) == :default_proc) ? :default_proc : :unknown
         else
           :unknown
         end

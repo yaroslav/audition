@@ -71,8 +71,40 @@ module Audition
                "it isolates self-contained lambdas; or " \
                "promote the logic to a method."
 
+        explain :hash_default_proc,
+          severity: :error,
+          message: "constant %{name} holds a Hash with a " \
+                   "default proc",
+          why: "The default block is a Proc baked into the " \
+               "Hash, and freezing the Hash does not make " \
+               "the block shareable; a non-main Ractor " \
+               "reading this constant raises " \
+               "Ractor::IsolationError. Rails removed this " \
+               "pattern twice during its ractorization.",
+          fix: "Use a plain frozen Hash with explicit keys, " \
+               "or drop the default proc and fetch with a " \
+               "literal default: hash.fetch(key, [])."
+
+        explain :constant_mutation,
+          severity: :warning,
+          message: "in-place %{method} on constant %{name}",
+          why: "A constant mutated after load is shared " \
+               "mutable state: non-main Ractors raise " \
+               "Ractor::IsolationError reading it while " \
+               "unfrozen, and freezing it turns this call " \
+               "into a FrozenError.",
+          fix: "Build the complete value at load time and " \
+               "freeze it (each_with_object then .freeze), " \
+               "or move the registry behind a writer that " \
+               "rebuilds and refreezes on each change, the " \
+               "copy-on-write style Rails registries use."
+
         on :constant_write_node, :constant_or_write_node do |node|
           examine(node.name.to_s, node, node.value)
+        end
+
+        on :call_node do |node|
+          flag_constant_mutation(node)
         end
 
         on :constant_path_write_node,
@@ -90,8 +122,8 @@ module Audition
             flag(node, :mutable_string, name: name,
               autofix: append_freeze(value))
           when :mutable_container
-            type = value.is_a?(Prism::HashNode) ? "Hash" : "Array"
-            flag(node, :mutable_container, name: name, type: type,
+            flag(node, :mutable_container, name: name,
+              type: container_type(value),
               autofix: wrap_make_shareable(value))
           when :shallow_freeze
             flag(node, :shallow_freeze, name: name,
@@ -102,6 +134,41 @@ module Audition
           when :proc
             flag(node, :proc_constant, name: name,
               autofix: wrap_make_shareable(value))
+          when :default_proc
+            flag(node, :hash_default_proc, name: name)
+          end
+        end
+
+        # Mutators that read as data mutation, not as class-level
+        # method names (delete/update/store would collide with
+        # Active Record class methods). Screaming-case receivers
+        # only: `RENDERERS << x` is a registry mutation, while
+        # `User << x` is a class method call.
+        MUTATORS = Ractor.make_shareable(
+          %i[[]= << push unshift concat merge! replace]
+        )
+
+        def flag_constant_mutation(node)
+          return unless MUTATORS.include?(node.name)
+
+          name = classifier.const_name(node.receiver)
+          return unless name
+          return if name == "ENV"
+          return unless name.split("::").last
+            .match?(/\A[A-Z][A-Z0-9_]*\z/)
+
+          flag(node, :constant_mutation, name: name,
+            method: node.name.to_s)
+        end
+
+        def container_type(value)
+          case value
+          when Prism::HashNode, Prism::KeywordHashNode then "Hash"
+          when Prism::ArrayNode then "Array"
+          when Prism::CallNode
+            classifier.const_name(value.receiver) || "container"
+          else
+            "container"
           end
         end
 

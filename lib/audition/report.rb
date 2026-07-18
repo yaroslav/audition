@@ -39,7 +39,7 @@ module Audition
       end
 
       PAINTS.each do |name|
-        define_method(name) do |text|
+        define_method(name) do |text| # audition:disable unsafe-calls
           @pastel.public_send(name, text)
         end
       end

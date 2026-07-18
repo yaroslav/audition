@@ -83,6 +83,22 @@ module Audition
           fix: "Fork before spawning Ractors, or use " \
                "spawn/exec."
 
+        explain :define_method_closure,
+          severity: :warning,
+          message: "define_method carries its block as a Proc",
+          why: "Methods born from define_method keep the " \
+               "defining block; calling one from a non-main " \
+               "Ractor raises Ractor::IsolationError " \
+               "(\"defined with an un-shareable Proc\") " \
+               "unless the block was made shareable first.",
+          fix: "Generate the method with class_eval and a " \
+               "source string (how Rails fixed its autosave " \
+               "callbacks), or pass an isolated block: " \
+               "define_method(:x, " \
+               "&Ractor.make_shareable(proc { ... })). " \
+               "Isolated blocks cannot capture outer locals " \
+               "or use super."
+
         explain :singleton_include,
           severity: :warning,
           message: "include Singleton memoizes the instance " \
@@ -119,6 +135,7 @@ module Audition
         on :call_node do |node|
           apply_rules(node)
           flag_singleton_include(node)
+          flag_define_method(node)
         end
 
         private
@@ -147,6 +164,16 @@ module Audition
           else
             false
           end
+        end
+
+        # Only literal blocks are flagged: `&SOMETHING` block
+        # pass-throughs are how isolated, pre-shared procs get
+        # attached, which is the sanctioned form.
+        def flag_define_method(node)
+          return unless node.name == :define_method
+          return unless node.block.is_a?(Prism::BlockNode)
+
+          flag(node, :define_method_closure)
         end
 
         def flag_singleton_include(node)

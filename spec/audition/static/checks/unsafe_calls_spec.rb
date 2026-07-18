@@ -65,4 +65,26 @@ RSpec.describe Audition::Static::Checks::UnsafeCalls do
   it "does not flag unrelated calls that share names with receivers" do
     expect(findings_for("scope.yield(42)\nrecord.trap")).to be_empty
   end
+
+  it "flags define_method with a literal block" do
+    findings = findings_for(<<~RUBY)
+      class Post
+        define_method(:tags) { @tags }
+        singleton_class.define_method(:all) { @all }
+      end
+    RUBY
+
+    expect(findings.map(&:line)).to eq([2, 3])
+    expect(findings).to all(have_attributes(severity: :warning))
+    expect(findings.first.why).to include("un-shareable Proc")
+    expect(findings.first.fix).to include("class_eval")
+  end
+
+  it "leaves define_method with a shareable block pass-through alone" do
+    findings = findings_for(<<~RUBY)
+      define_method(:visit, &WRAPPER)
+    RUBY
+
+    expect(findings).to be_empty
+  end
 end

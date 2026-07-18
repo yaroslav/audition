@@ -26,9 +26,14 @@ module Audition
         "it while it holds a non-shareable value (verified on " \
         "Ruby 4.0)."
       STATE_FIX =
-        "Precompute and freeze the value at load time, use " \
-        "Ractor.store_if_absent for lazy initialization, or keep " \
-        "per-Ractor state in Ractor.current[:key]."
+        "Precompute and freeze the value at load time (for " \
+        "per-subclass values, in the inherited hook). For " \
+        "collections, rebuild and refreeze on write, " \
+        "Rails-style copy-on-write: self.list = " \
+        "(list + [item]).freeze; never mutate in place. As a " \
+        "last resort use Ractor.store_if_absent for lazy " \
+        "initialization or per-Ractor state in " \
+        "Ractor.current[:key]."
 
       # @param sources [Hash{String => String}] path => source
       # @return [Array<Finding>]
