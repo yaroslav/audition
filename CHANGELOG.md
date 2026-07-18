@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0] - Unreleased
+
+- Class-level memoization fixes recognize both idioms (`@x ||=`
+  and `return @x if defined?(@x)`) and prefer plain Ruby with no
+  Ractor-specific APIs: cheap deterministic values are de-memoized
+  in place, with stray reads redirected to the memoizing method.
+  `Ractor.store_if_absent` remains the fallback for initializers
+  with blocks and is emitted as an indented `do..end` block when
+  the value spans lines.
+- `--dry-run` previews render touching edits as a single hunk
+  instead of repeating a line in two half-applied states.
+
 ## [0.1.0] - 2026-07-18
 
 Initial release. Written end to end by Claude Fable 5 (Anthropic);

@@ -114,28 +114,47 @@ module Audition
       source
     end
 
+    # Edits whose line windows overlap (a guard deletion runs into
+    # the write it pairs with) render as one hunk, so the preview
+    # never repeats a line in two half-applied states.
     def hunks(plan)
-      plan.edits.sort_by(&:start_offset).map do |edit|
-        line_start =
-          if edit.start_offset.zero?
-            0
-          else
-            before = plan.source.rindex("\n", edit.start_offset - 1)
-            before ? before + 1 : 0
-          end
-        line_end = plan.source.index("\n", edit.end_offset) ||
-          plan.source.length
-        old = plan.source[line_start...line_end]
+      groups = []
+      plan.edits.sort_by(&:start_offset).each do |edit|
+        from, upto = line_window(plan.source, edit)
+        if groups.any? && from <= groups.last[:upto]
+          last = groups.last
+          last[:upto] = [last[:upto], upto].max
+          last[:edits] << edit
+        else
+          groups << {from: from, upto: upto, edits: [edit]}
+        end
+      end
+      groups.map do |group|
+        old = plan.source[group[:from]...group[:upto]]
         updated = old.dup
-        span = ((edit.start_offset - line_start)...
-                (edit.end_offset - line_start))
-        updated[span] = edit.replacement
+        group[:edits].reverse_each do |edit|
+          span = ((edit.start_offset - group[:from])...
+                  (edit.end_offset - group[:from]))
+          updated[span] = edit.replacement
+        end
         {
-          line: plan.source[0, edit.start_offset].count("\n") + 1,
+          line: plan.source[0, group[:from]].count("\n") + 1,
           old: old,
           new: updated.chomp
         }
       end
+    end
+
+    def line_window(source, edit)
+      from =
+        if edit.start_offset.zero?
+          0
+        else
+          before = source.rindex("\n", edit.start_offset - 1)
+          before ? before + 1 : 0
+        end
+      upto = source.index("\n", edit.end_offset) || source.length
+      [from, upto]
     end
   end
 end

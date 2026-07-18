@@ -107,6 +107,142 @@ RSpec.describe "unsafe rewriters" do
     end
   end
 
+  it "de-memoizes a defined? guard into a plain computation" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "platform.rb", <<~RUBY)
+        module Platform
+          class << self
+            def windows?
+              return @windows if defined?(@windows)
+
+              @windows = RUBY_PLATFORM
+                .match?(/mswin|mingw/)
+            end
+          end
+        end
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).not_to include("@windows")
+      expect(content).not_to include("defined?")
+      expect(content).not_to include("Ractor")
+      expect(all_findings(path)).to be_empty
+
+      script = <<~RUBY
+        Warning[:experimental] = false
+        require #{path.inspect}
+        value = Ractor.new { Platform.windows? }.value
+        raise "broken" unless value == false
+        print "works-in-ractor"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("works-in-ractor"), err
+    end
+  end
+
+  it "keeps helper statements when de-memoizing" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "runner.rb", <<~RUBY)
+        class Runner
+          def self.binary_path
+            return @binary_path if defined?(@binary_path)
+
+            executable = "bun"
+            @binary_path = File.join("/opt", executable)
+          end
+        end
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).to include(%(executable = "bun"\n))
+      expect(content).to include('File.join("/opt", executable)')
+      expect(content).not_to include("@binary_path")
+      expect(all_findings(path)).to be_empty
+    end
+  end
+
+  it "redirects stray reads to the de-memoized method" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "paths.rb", <<~RUBY)
+        class Paths
+          def self.root
+            return @root if defined?(@root)
+
+            @root = File.expand_path("..")
+          end
+
+          def self.doc = File.join(@root, "doc")
+        end
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).to include('File.join(root, "doc")')
+      expect(content).not_to include("@root")
+      expect(all_findings(path)).to be_empty
+    end
+  end
+
+  it "previews touching edits as one hunk" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "hunk.rb", <<~RUBY)
+        module Platform
+          def self.windows?
+            return @windows if defined?(@windows)
+
+            @windows = RUBY_PLATFORM.match?(/mswin/)
+          end
+        end
+      RUBY
+
+      previews = Audition::Fixer.new(unsafe: true)
+        .preview(all_findings(path))
+
+      hunks = previews.sum { |p| p[:hunks].size }
+      expect(hunks).to eq(1)
+      hunk = previews.first[:hunks].first
+      expect(hunk[:old]).to include("return @windows")
+      expect(hunk[:new]).to eq(
+        "    RUBY_PLATFORM.match?(/mswin/)"
+      )
+    end
+  end
+
+  it "keeps Ractor storage for initializers with blocks" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "loader.rb", <<~RUBY)
+        module Host
+          def self.loader
+            return @loader if defined?(@loader)
+
+            @loader = Struct.new(:x).new(1).tap do |value|
+              value.x += 1
+            end
+          end
+        end
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).not_to include("defined?")
+      expect(content).to include(<<-RUBY.chomp)
+    Ractor.store_if_absent(:"Host/@loader") do
+      Struct.new(:x).new(1).tap do |value|
+        value.x += 1
+      end
+    end
+      RUBY
+      expect(Prism.parse(content).success?).to be(true)
+      expect(all_findings(path)).to be_empty
+    end
+  end
+
   it "converts a write-once global into a frozen constant" do
     Dir.mktmpdir do |dir|
       path = write(dir, "gvar.rb", <<~RUBY)

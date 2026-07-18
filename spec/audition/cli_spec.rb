@@ -91,7 +91,9 @@ RSpec.describe Audition::CLI do
 
       status, out, = run(path, "--fix-unsafe", "--static-only")
 
-      expect(File.read(path)).to include("Ractor.store_if_absent")
+      content = File.read(path)
+      expect(content).to include('def self.config = ({ "a" => 1 })')
+      expect(content).not_to include("@config")
       expect(out).to include("fixed 1")
       expect(status).to eq(0)
     end

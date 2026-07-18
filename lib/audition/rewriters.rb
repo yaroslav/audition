@@ -84,15 +84,28 @@ module Audition
 
     # -- class-level memoization -------------------------------------
 
-    # Rewrites singleton-scope ivar state to Ractor-local storage:
+    # Rewrites singleton-scope memoization, both idioms:
+    #   @x ||= expr
+    #   return @x if defined?(@x); @x = expr
+    #
+    # Preferred strategy is de-memoization, plain Ruby with no
+    # Ractor-specific APIs: the guard line is deleted, the write
+    # prefix is stripped so the method recomputes its value, and
+    # stray reads in sibling singleton methods become calls to the
+    # memoizing method. Chosen when the value expression carries no
+    # block (a proxy for one-time side effects), there is a single
+    # memo site, and no other writes exist.
+    #
+    # Otherwise falls back to Ractor-local storage:
     #   @x ||= expr   ->  Ractor.store_if_absent(:"Klass/@x") { expr }
     #   @x = expr     ->  Ractor.current[:"Klass/@x"] = expr
     #   @x            ->  Ractor.current[:"Klass/@x"]
+    #
     # Only when every reference in singleton scope is visible in
     # this file, none sit directly in the class body, and no
-    # compound writes exist. Caveat (why this is unsafe): each
-    # Ractor computes its own copy, and store_if_absent treats a
-    # stored nil as present where ||= would recompute.
+    # compound writes exist. Caveat (why this is unsafe): the
+    # de-memoized method returns a fresh object per call, and each
+    # Ractor computes its own copy under store_if_absent.
     module Memoization
       def self.plan(file, findings)
         return [] if findings.none? { |f| f.check == "class-level-state" }
@@ -104,42 +117,188 @@ module Audition
           next if namespace.empty?
 
           kinds = ops.map { |op| op[:kind] }
-          next unless kinds.include?(:or_write)
           next if kinds.include?(:other)
           next if ops.any? { |op| op[:body] }
 
-          key = %(:"#{namespace}/#{name}")
-          ops.each { |op| edits << edit_for(op, key) }
+          memos = memo_sites(ops)
+          next if memos.empty?
+          next if orphan_guards?(ops, memos)
+
+          if dememoizable?(ops, memos)
+            edits.concat(plain_edits(file, ops, memos))
+          else
+            key = %(:"#{namespace}/#{name}")
+            edits.concat(ractor_edits(file, ops, memos, key))
+          end
         end
         edits
       end
 
-      def self.edit_for(op, key)
-        node = op[:node]
-        case op[:kind]
-        when :or_write
-          value = node.value.location.slice
-          Autofix.new(
-            start_offset: node.location.start_offset,
-            end_offset: node.location.end_offset,
-            replacement:
-              "Ractor.store_if_absent(#{key}) { #{value} }",
+      # A memo site is an ||= write, or a plain write paired with a
+      # defined? return guard inside the same method. A guarded
+      # method with more than one write is nobody's memoization;
+      # such groups are dropped by the orphan check below.
+      def self.memo_sites(ops)
+        guards = ops.select { |op| op[:kind] == :guard }
+        ops.filter_map do |op|
+          case op[:kind]
+          when :or_write
+            {op: op, guard: nil}
+          when :write
+            guard = guards.find { |g| g[:def_id] == op[:def_id] }
+            {op: op, guard: guard} if guard
+          end
+        end
+      end
+
+      def self.orphan_guards?(ops, memos)
+        used = memos.filter_map { |m| m[:guard] }
+        guards = ops.select { |op| op[:kind] == :guard }
+        return true if guards.size != used.size
+
+        writes = ops.select { |op| op[:kind] == :write }
+        guards.any? do |guard|
+          writes.count { |w| w[:def_id] == guard[:def_id] } != 1
+        end
+      end
+
+      def self.dememoizable?(ops, memos)
+        return false unless memos.size == 1
+
+        memo = memos.first
+        return false unless blockless?(memo[:op][:node].value)
+
+        writes = ops.select { |op| op[:kind] == :write }
+        stray_writes = writes.reject { |w| w.equal?(memo[:op]) }
+        return false unless stray_writes.empty?
+
+        reads = ops.select { |op| op[:kind] == :read }
+        reads.none? { |r| r[:def_id] == memo[:op][:def_id] }
+      end
+
+      def self.blockless?(node)
+        queue = [node]
+        until queue.empty?
+          current = queue.shift
+          if current.is_a?(Prism::BlockNode) ||
+              current.is_a?(Prism::LambdaNode)
+            return false
+          end
+          queue.concat(current.child_nodes.compact)
+        end
+        true
+      end
+
+      def self.plain_edits(file, ops, memos)
+        memo = memos.first
+        edits = []
+        if memo[:guard]
+          edits << deletion(file.source, memo[:guard][:node])
+        end
+        node = memo[:op][:node]
+        edits << Autofix.new(
+          start_offset: node.location.start_offset,
+          end_offset: node.location.end_offset,
+          replacement: node.value.location.slice,
+          safety: :unsafe
+        )
+        method_name = memo[:op][:def_name].to_s
+        ops.select { |op| op[:kind] == :read }.each do |op|
+          read = op[:node]
+          edits << Autofix.new(
+            start_offset: read.location.start_offset,
+            end_offset: read.location.end_offset,
+            replacement: method_name,
             safety: :unsafe
           )
-        when :write
-          Autofix.new(
-            start_offset: node.name_loc.start_offset,
-            end_offset: node.name_loc.end_offset,
-            replacement: "Ractor.current[#{key}]",
-            safety: :unsafe
-          )
-        when :read
-          Autofix.new(
-            start_offset: node.location.start_offset,
-            end_offset: node.location.end_offset,
-            replacement: "Ractor.current[#{key}]",
-            safety: :unsafe
-          )
+        end
+        edits
+      end
+
+      def self.ractor_edits(file, ops, memos, key)
+        guarded = memos.filter_map { |m| m[:op] if m[:guard] }
+        edits = memos.filter_map do |memo|
+          deletion(file.source, memo[:guard][:node]) if memo[:guard]
+        end
+        ops.each do |op|
+          node = op[:node]
+          edits <<
+            if op[:kind] == :or_write || guarded.include?(op)
+              Autofix.new(
+                start_offset: node.location.start_offset,
+                end_offset: node.location.end_offset,
+                replacement: store_wrap(file.source, node, key),
+                safety: :unsafe
+              )
+            elsif op[:kind] == :write
+              Autofix.new(
+                start_offset: node.name_loc.start_offset,
+                end_offset: node.name_loc.end_offset,
+                replacement: "Ractor.current[#{key}]",
+                safety: :unsafe
+              )
+            else
+              Autofix.new(
+                start_offset: node.location.start_offset,
+                end_offset: node.location.end_offset,
+                replacement: "Ractor.current[#{key}]",
+                safety: :unsafe
+              )
+            end
+        end
+        edits
+      end
+
+      # A single-line value keeps the brace form; a multi-line
+      # value becomes a do..end block with the body shifted one
+      # level right, so the rewrite stays idiomatic. When the write
+      # shares its line with other code, layout cannot be inferred
+      # and the brace form is kept as-is.
+      def self.store_wrap(source, node, key)
+        value = node.value.location.slice
+        call = "Ractor.store_if_absent(#{key})"
+        return "#{call} { #{value} }" unless value.include?("\n")
+
+        from = node.location.start_offset
+        start = from.zero? ? 0 : (source.rindex("\n", from - 1) || -1) + 1
+        indent = source[start...from]
+        return "#{call} { #{value} }" unless indent.match?(/\A[ \t]*\z/)
+
+        body = value.lines.map.with_index do |line, index|
+          if index.zero?
+            "#{indent}  #{line}"
+          elsif line.match?(/\A\s*\z/)
+            line
+          else
+            "  #{line}"
+          end
+        end.join
+        "#{call} do\n#{body}\n#{indent}end"
+      end
+
+      # Deletes the guard statement together with its line and any
+      # blank lines that follow, so the method body does not open
+      # with a hole. Falls back to the bare node span when other
+      # code shares the line.
+      def self.deletion(source, node)
+        from = node.location.start_offset
+        upto = node.location.end_offset
+        start = from.zero? ? 0 : (source.rindex("\n", from - 1) || -1) + 1
+        if source[start...from].match?(/\A[ \t]*\z/)
+          newline = source.index("\n", upto)
+          stop = newline ? newline + 1 : source.length
+          loop do
+            newline = source.index("\n", stop)
+            break unless newline
+            break unless source[stop...newline].match?(/\A[ \t]*\z/)
+
+            stop = newline + 1
+          end
+          Autofix.new(start_offset: start, end_offset: stop,
+            replacement: "", safety: :unsafe)
+        else
+          Autofix.new(start_offset: from, end_offset: upto,
+            replacement: "", safety: :unsafe)
         end
       end
 
@@ -188,10 +347,26 @@ module Audition
         def visit_def_node(node)
           kind =
             node.receiver.is_a?(Prism::SelfNode) ? :self : :plain
-          @def_stack.push(kind)
+          @def_stack.push(
+            {kind: kind, id: node.object_id, name: node.name}
+          )
           super
         ensure
           @def_stack.pop
+        end
+
+        # Matches the guard statement of the second memoization
+        # idiom: `return @x if defined?(@x)`. On a match the inner
+        # reads are not visited (they belong to the guard, not to
+        # the data flow) and the whole statement is recorded so the
+        # planner can delete it.
+        def visit_if_node(node)
+          name = guard_name(node)
+          if name
+            record(node, :guard, name)
+          else
+            super
+          end
         end
 
         {
@@ -203,21 +378,45 @@ module Audition
           visit_instance_variable_target_node: :other
         }.each do |method, kind|
           define_method(method) do |node|
-            record(node, kind)
+            record(node, kind, node.name)
             super(node)
           end
         end
 
         private
 
-        def record(node, kind)
+        def guard_name(node)
+          predicate = node.predicate
+          return unless predicate.is_a?(Prism::DefinedNode)
+
+          checked = predicate.value
+          return unless checked.is_a?(Prism::InstanceVariableReadNode)
+          return if node.subsequent
+
+          body = node.statements&.body
+          return unless body && body.size == 1
+          return unless body[0].is_a?(Prism::ReturnNode)
+
+          returned = body[0].arguments&.arguments
+          return unless returned && returned.size == 1
+          return unless returned[0]
+            .is_a?(Prism::InstanceVariableReadNode)
+          return unless returned[0].name == checked.name
+
+          checked.name
+        end
+
+        def record(node, kind, name)
           return if @namespace.empty?
 
-          in_def = !@def_stack.empty?
+          current_def = @def_stack.last
           singleton_method =
-            @def_stack.last == :self ||
-            (@def_stack.last == :plain && @sclass_depth.positive?)
-          if in_def
+            current_def && (
+              current_def[:kind] == :self ||
+              (current_def[:kind] == :plain &&
+                @sclass_depth.positive?)
+            )
+          if current_def
             return unless singleton_method
 
             body = false
@@ -225,8 +424,12 @@ module Audition
             body = true
           end
 
-          key = [@namespace.join("::"), node.name.to_s]
-          @groups[key] << {node: node, kind: kind, body: body}
+          key = [@namespace.join("::"), name.to_s]
+          @groups[key] << {
+            node: node, kind: kind, body: body,
+            def_id: current_def && current_def[:id],
+            def_name: current_def && current_def[:name]
+          }
         end
       end
     end
