@@ -106,7 +106,7 @@ RSpec.describe Audition::Report do
       )
 
       expect(report.to_text(style: style))
-        .to include("3 more with --fix-unsafe")
+        .to include("3 edits with --fix-unsafe")
     end
 
     it "counts fixable findings in the summary" do
@@ -122,6 +122,50 @@ RSpec.describe Audition::Report do
 
       expect(text).to match(/1 fixable/)
     end
+
+    it "does not count unsafe-only autofixes as fixable" do
+      unsafe = finding(
+        autofix: Audition::Autofix.new(
+          start_offset: 0, end_offset: 0, replacement: "x",
+          safety: :unsafe
+        )
+      )
+      style = Audition::Report::Style.new(
+        color: false, hyperlinks: false
+      )
+      text = report_for([unsafe]).to_text(style: style)
+
+      expect(report_for([unsafe]).counts[:fixable]).to eq(0)
+      expect(text).not_to include("fixable")
+    end
+
+    it "pluralizes summary counts" do
+      style = Audition::Report::Style.new(
+        color: false, hyperlinks: false
+      )
+      one = report_for([
+        finding, finding(severity: :warning),
+        finding(dependency: true)
+      ]).to_text(style: style)
+      two = report_for([finding, finding]).to_text(style: style)
+
+      expect(one).not_to include("1 errors")
+      expect(one).not_to include("1 warnings")
+      expect(one).not_to include("1 dependency errors")
+      expect(two).to include("2 errors")
+    end
+
+    it "keeps overlong tokens intact when wrapping" do
+      url = "https://example.com/#{"z" * 90}"
+      style = Audition::Report::Style.new(
+        color: false, hyperlinks: false
+      )
+      long = finding.with(why: "See #{url}.")
+      text = report_for([long]).to_text(style: style)
+
+      expect(text).to include("https://example.com/")
+      expect(text.count("z")).to eq(90)
+    end
   end
 
   describe "github format" do
@@ -135,6 +179,15 @@ RSpec.describe Audition::Report do
       expect(out).to include("read of global variable $x")
       expect(out).not_to include("\n::error file=lib/a.rb\n")
       expect(out).to include("verdict")
+    end
+
+    it "property-escapes file and title in annotations" do
+      weird = finding(path: "lib/a,b%:c.rb")
+
+      out = report_for([weird]).to_github
+
+      expect(out).to include("file=lib/a%2Cb%25%3Ac.rb,line=3,")
+      expect(out).to include("title=audition global-variables::")
     end
   end
 

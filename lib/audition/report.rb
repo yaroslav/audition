@@ -135,7 +135,12 @@ module Audition
           else
             acc[f.severity] += 1
           end
-          acc[:fixable] += 1 if f.fixable?
+          # Only safe autofixes count: `--fix` alone would not
+          # touch an unsafe-only finding, so advertising it as
+          # fixable would send users in circles.
+          if f.autofix && !f.autofix.unsafe?
+            acc[:fixable] += 1
+          end
         end
       end
     end
@@ -160,8 +165,10 @@ module Audition
         level = GITHUB_LEVELS.fetch(f.severity)
         location = f.line ? ",line=#{f.line}" : ""
         body = workflow_escape("#{f.message}. #{f.why}")
-        "::#{level} file=#{f.path}#{location}," \
-        "title=audition #{f.check}::#{body}"
+        file = property_escape(f.path)
+        title = property_escape("audition #{f.check}")
+        "::#{level} file=#{file}#{location}," \
+        "title=#{title}::#{body}"
       end
       lines << "audition verdict: #{VERDICTS.fetch(verdict)}"
       lines.join("\n")
@@ -206,6 +213,12 @@ module Audition
 
     def workflow_escape(text)
       text.gsub("%", "%25").gsub("\r", "%0D").gsub("\n", "%0A")
+    end
+
+    # Workflow command properties additionally reserve `:` and `,`;
+    # an unescaped comma in a path would end the property early.
+    def property_escape(text)
+      workflow_escape(text).gsub(":", "%3A").gsub(",", "%2C")
     end
 
     public
@@ -276,8 +289,11 @@ module Audition
         wrapped.map { |line| "      #{@style.dim(line)}" }
       end
 
+      # Tokens longer than the width (long URLs) cannot end before
+      # whitespace, so the first alternative would drop their head;
+      # the second hard-slices them instead.
       def wrap(text, width)
-        text.scan(/\S.{0,#{width - 1}}(?=\s|\z)/m)
+        text.scan(/\S.{0,#{width - 1}}(?=\s|\z)|\S{#{width}}/m)
       end
 
       def dynamic_section
@@ -298,16 +314,24 @@ module Audition
         [lines.join("\n") + "\n"]
       end
 
+      def pluralize(count, noun)
+        (count == 1) ? "#{count} #{noun}" : "#{count} #{noun}s"
+      end
+
       def summary
         s = @style
         c = @report.counts
         parts = []
-        parts << s.red("#{c[:error]} errors") if c[:error].positive?
+        if c[:error].positive?
+          parts << s.red(pluralize(c[:error], "error"))
+        end
         if c[:dep_error].positive?
-          parts << s.magenta("#{c[:dep_error]} dependency errors")
+          parts << s.magenta(
+            pluralize(c[:dep_error], "dependency error")
+          )
         end
         if c[:warning].positive?
-          parts << s.yellow("#{c[:warning]} warnings")
+          parts << s.yellow(pluralize(c[:warning], "warning"))
         end
         parts << s.cyan("#{c[:info]} info") if c[:info].positive?
         if c[:fixable].positive?
@@ -318,7 +342,8 @@ module Audition
         end
         if @report.unsafe_fixes.positive?
           parts << s.cyan(
-            "#{@report.unsafe_fixes} more with --fix-unsafe"
+            pluralize(@report.unsafe_fixes, "edit") +
+            " with --fix-unsafe"
           )
         end
         if @report.baselined.positive?

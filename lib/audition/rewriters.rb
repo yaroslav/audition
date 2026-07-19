@@ -4,10 +4,51 @@ require "prism"
 
 module Audition
   # Unsafe-tier, multi-site rewrites planned at fix time from a
-  # parsed file plus its findings. Each .plan returns Autofix edits
-  # (safety :unsafe) or, for MagicComments, a file-level edit plus
-  # the list of checks it makes redundant.
+  # parsed file plus its findings. MagicComments.plan returns a
+  # file-level edit plus the list of checks it makes redundant.
+  # Memoization.plan and WriteOnce.plan return one bundle per
+  # converted variable group ({edits:, sites:}, safety :unsafe);
+  # Rewriters.resolve flattens them to edits after dropping groups
+  # whose edits would swallow another converted group's sites.
   module Rewriters
+    # A planned conversion for one variable group: the group's
+    # edits plus the byte spans of every recorded site, so
+    # cross-group nesting is visible before edits are applied.
+    # Nil when the group produced no edits.
+    def self.bundle(ops, edits)
+      return nil if edits.empty?
+
+      sites = ops.map do |op|
+        location = op[:node].location
+        [location.start_offset, location.end_offset]
+      end
+      {edits: edits, sites: sites}
+    end
+
+    # The fixer keeps the first of two overlapping edits, so an
+    # edit whose span contains a site of a different converted
+    # group would keep that nested site's old text while the rest
+    # of the other group moves (a stale read at runtime). Such
+    # groups are skipped here and keep their findings.
+    def self.resolve(bundles)
+      bundles.flat_map do |bundle|
+        clobbers = bundles.any? do |other|
+          !other.equal?(bundle) && swallows?(bundle, other)
+        end
+        clobbers ? [] : bundle[:edits]
+      end
+    end
+
+    def self.swallows?(bundle, other)
+      bundle[:edits].any? do |edit|
+        next false if edit.start_offset >= edit.end_offset
+
+        other[:sites].any? do |from, upto|
+          edit.start_offset <= from && upto <= edit.end_offset
+        end
+      end
+    end
+
     # -- magic comments ----------------------------------------------
 
     module MagicComments
@@ -42,13 +83,18 @@ module Audition
         flagged = kinds.reject do |k|
           %i[shareable unknown].include?(k)
         end
-        scv_ok = values.all? do |value|
-          deep_literal?(value, classifier)
-        end
+        scv_ok = values.any? &&
+          values.all? { |value| deep_literal?(value, classifier) }
 
+        # Both branches demand something to fix: with no constant
+        # values (a lone constant-mutation finding) or nothing
+        # flagged, a comment would freeze unrelated code while
+        # fixing nothing. An explicit `frozen_string_literal:
+        # false` is an author opt-out and is never overridden.
         if scv_ok
           comment_plan(file, SCV_LINE)
-        elsif !file.frozen_string_literal? &&
+        elsif flagged.any? &&
+            file.magic_comment("frozen_string_literal").nil? &&
             flagged.all? { |k| k == :mutable_string }
           comment_plan(file, FSL_LINE)
         end
@@ -171,7 +217,7 @@ module Audition
 
         collector = SingletonIvars.new
         collector.visit(file.root)
-        edits = []
+        bundles = []
         collector.groups.each do |(namespace, name), ops|
           next if namespace.empty?
 
@@ -181,7 +227,7 @@ module Audition
 
           memos = memo_sites(ops)
           if memos.empty?
-            edits.concat(setter_edits(ops))
+            bundles << Rewriters.bundle(ops, setter_edits(file, ops))
             next
           end
           next if orphan_guards?(ops, memos)
@@ -202,7 +248,7 @@ module Audition
           end
 
           if freezable?(ops, memos)
-            edits.concat(freeze_edits(file, memos))
+            bundles << Rewriters.bundle(ops, freeze_edits(file, memos))
           else
             # Ractor-local slots are keyed by lexical owner; on a
             # class the ivar is per-subclass (faraday's
@@ -210,12 +256,38 @@ module Audition
             # every subclass's state. Modules cannot be
             # subclassed, so only module-owned state converts.
             next if ops.any? { |op| op[:class_owner] }
+            # Deleting the defined? guard sends every call through
+            # the statements after the write, so the warm path
+            # only keeps returning the memo when the guarded write
+            # ends its def body (or a bare read of the same ivar
+            # does).
+            next unless memos.all? do |m|
+              m[:guard].nil? || tail_write?(m[:op])
+            end
 
             key = %(:"#{namespace}/#{name}")
-            edits.concat(ractor_edits(file, ops, memos, key))
+            bundles << Rewriters.bundle(
+              ops, ractor_edits(file, ops, memos, key)
+            )
           end
         end
-        edits
+        bundles.compact
+      end
+
+      def self.tail_write?(op)
+        body = op[:def_node]&.body
+        return false unless body.is_a?(Prism::StatementsNode)
+
+        statements = body.body
+        index = statements.index { |s| s.equal?(op[:node]) }
+        return false unless index
+
+        rest = statements[(index + 1)..]
+        return true if rest.empty?
+
+        rest.size == 1 &&
+          rest[0].is_a?(Prism::InstanceVariableReadNode) &&
+          rest[0].name == op[:node].name
       end
 
       def self.classifier(file)
@@ -258,25 +330,63 @@ module Audition
       # from any Ractor become legal, unshareable values keep
       # today's behavior through the rescue. Only bare local reads
       # are wrapped; computed values are left for a human.
-      def self.setter_edits(ops)
+      def self.setter_edits(file, ops)
+        receivers = nil
         ops.filter_map do |op|
           next unless op[:kind] == :write
           # Only genuine setters: a plain method restoring a saved
-          # local (sinatra's route conditions) must stay untouched.
-          next unless op[:def_name].to_s.end_with?("=")
+          # local (sinatra's route conditions) and operator defs
+          # ([]=) must stay untouched.
+          setter = op[:def_name].to_s
+          next unless setter.match?(/\A\w+=\z/)
 
           value = op[:node].value
           next unless value.is_a?(Prism::LocalVariableReadNode)
 
-          name = value.name
+          # A value the file mutates in place through the reader
+          # accessor (`def self.set(k, v); options[k] = v; end`)
+          # or through a direct read of the ivar must never be
+          # frozen: the mutation would raise FrozenError.
+          receivers ||= mutator_receivers(file)
+          reader = setter.delete_suffix("=").to_sym
+          mutated = receivers.any? do |receiver|
+            (receiver.is_a?(Prism::CallNode) &&
+              receiver.name == reader) ||
+              (receiver.is_a?(Prism::InstanceVariableReadNode) &&
+                receiver.name == op[:node].name)
+          end
+          next if mutated
+
+          local = value.name
           Autofix.new(
             start_offset: value.location.start_offset,
             end_offset: value.location.end_offset,
             replacement:
-              "(Ractor.make_shareable(#{name}) rescue #{name})",
+              "(Ractor.make_shareable(#{local}) rescue #{local})",
             safety: :unsafe
           )
         end
+      end
+
+      # Receivers of in-place mutator calls anywhere in the file,
+      # index writes included; mirrors SourceFile#mutated_constants.
+      def self.mutator_receivers(file)
+        receivers = []
+        queue = [file.root]
+        until queue.empty?
+          node = queue.shift
+          queue.concat(node.child_nodes.compact)
+          mutator =
+            (node.is_a?(Prism::CallNode) &&
+              Static::SourceFile::CONST_MUTATORS
+                .include?(node.name)) ||
+            Static::SourceFile::INDEX_WRITES
+              .any? { |type| node.is_a?(type) }
+          next unless mutator && node.receiver
+
+          receivers << node.receiver
+        end
+        receivers
       end
 
       def self.guarded_with_strays?(ops, memos)
@@ -506,27 +616,20 @@ module Audition
           @namespace = []
           @sclass_depth = 0
           @def_stack = []
+          @defined_depth = 0
           super
         end
 
         def visit_class_node(node)
-          @namespace.push(
-            {name: node.constant_path.location.slice,
-             kind: :class}
-          )
-          super
-        ensure
-          @namespace.pop
+          scoped(node.constant_path.location.slice, :class) do
+            super(node)
+          end
         end
 
         def visit_module_node(node)
-          @namespace.push(
-            {name: node.constant_path.location.slice,
-             kind: :module}
-          )
-          super
-        ensure
-          @namespace.pop
+          scoped(node.constant_path.location.slice, :module) do
+            super(node)
+          end
         end
 
         def visit_singleton_class_node(node)
@@ -546,11 +649,24 @@ module Audition
           kind =
             node.receiver.is_a?(Prism::SelfNode) ? :self : :plain
           @def_stack.push(
-            {kind: kind, id: node.object_id, name: node.name}
+            {kind: kind, id: node.object_id,
+             name: node.name, node: node}
           )
           super
         ensure
           @def_stack.pop
+        end
+
+        # A defined?(@x) that is not the recognized guard idiom
+        # probes ivar presence; rewriting the read to Ractor
+        # storage would make the probe unconditionally true, so
+        # every op inside disqualifies its group (recorded as
+        # :other).
+        def visit_defined_node(node)
+          @defined_depth += 1
+          super
+        ensure
+          @defined_depth -= 1
         end
 
         # Matches the guard statement of the second memoization
@@ -604,9 +720,27 @@ module Audition
           checked.name
         end
 
+        # class/module bodies open a fresh method scope: a def
+        # inside a module nested under `class << self` defines an
+        # instance method of that module, so the surrounding
+        # singleton context and def stack must not leak in.
+        def scoped(name, kind)
+          saved_depth = @sclass_depth
+          saved_stack = @def_stack
+          @namespace.push({name: name, kind: kind})
+          @sclass_depth = 0
+          @def_stack = []
+          yield
+        ensure
+          @sclass_depth = saved_depth
+          @def_stack = saved_stack
+          @namespace.pop
+        end
+
         def record(node, kind, name)
           return if @namespace.empty?
 
+          kind = :other if @defined_depth.positive?
           current_def = @def_stack.last
           singleton_method =
             current_def && (
@@ -628,6 +762,7 @@ module Audition
             node: node, kind: kind, body: body,
             def_id: current_def && current_def[:id],
             def_name: current_def && current_def[:name],
+            def_node: current_def && current_def[:node],
             class_owner: @namespace.last[:kind] == :class
           }
         end
@@ -642,14 +777,14 @@ module Audition
     # Unsafe because cross-file readers are invisible.
     module WriteOnce
       def self.plan(file, findings)
-        edits = []
+        bundles = []
         if findings.any? { |f| f.check == "global-variables" }
-          edits += globals(file)
+          bundles += globals(file)
         end
         if findings.any? { |f| f.check == "class-variables" }
-          edits += class_variables(file)
+          bundles += class_variables(file)
         end
-        edits
+        bundles
       end
 
       def self.globals(file)
@@ -672,8 +807,18 @@ module Audition
         classifier = Static::LiteralClassifier.new(
           frozen_string_literal: file.frozen_string_literal?
         )
-        edits = []
+        # The same bare @@name under two namespaces of one file is
+        # usually same-file inheritance sharing one runtime
+        # variable; converting either copy strands the other's
+        # readers with a NameError.
+        bare = collector.groups.keys
+          .map { |key| key.split("/").last }
+          .tally
+        planned = []
+        bundles = []
         collector.groups.each do |name, ops|
+          next if bare[name.split("/").last] > 1
+
           writes = ops.select { |op| op[:kind] == :write }
           next unless writes.size == 1 && writes[0][:assignable]
           next unless (ops - writes).all? { |op| op[:kind] == :read }
@@ -689,25 +834,36 @@ module Audition
           shareable = kind == :shareable
           # A mutable value that would get deep-frozen must never be
           # the receiver of a call afterwards: `X[k] = v`, `X << v`
-          # and friends would raise FrozenError at runtime. Reads of
-          # immutable values are safe anywhere.
+          # and friends would raise FrozenError at runtime. The same
+          # goes for reads that escape into a local (`list = $x;
+          # list << h`) or a call argument, where an alias can be
+          # mutated out of sight. Reads of immutable values are
+          # safe anywhere.
           unless shareable
-            mutated = (ops - writes).any? do |op|
-              collector.receiver_reads.include?(op[:node].object_id)
+            escapes = (ops - writes).any? do |op|
+              id = op[:node].object_id
+              collector.receiver_reads.include?(id) ||
+                collector.escaping_reads.include?(id)
             end
-            next if mutated
+            next if escapes
           end
 
           constant = yield(name.split("/").last)
           next unless constant.match?(/\A[A-Z][A-Z0-9_]*\z/)
           next if collector.taken_constants.include?(constant)
 
-          edits << Autofix.new(
+          # `$max` and `$MAX` both map to MAX; only the first may
+          # take the name, the second stays a variable.
+          target = [name.rpartition("/").first, constant]
+          next if planned.include?(target)
+
+          planned << target
+          edits = [Autofix.new(
             start_offset: write.name_loc.start_offset,
             end_offset: write.name_loc.end_offset,
             replacement: constant,
             safety: :unsafe
-          )
+          )]
           unless shareable
             value = write.value
             source = value.location.slice
@@ -731,8 +887,9 @@ module Audition
               safety: :unsafe
             )
           end
+          bundles << Rewriters.bundle(ops, edits)
         end
-        edits
+        bundles.compact
       end
 
       # Collects either global or class variable operations.
@@ -747,16 +904,19 @@ module Audition
           Static::Checks::GlobalVariables::LOAD_PATH_GLOBALS
         ).freeze
 
-        attr_reader :groups, :taken_constants, :receiver_reads
+        attr_reader :groups, :taken_constants, :receiver_reads,
+          :escaping_reads
 
         def initialize(mode)
           @mode = mode
           @groups = Hash.new { |h, k| h[k] = [] }
           @taken_constants = []
           @receiver_reads = {}
+          @escaping_reads = {}
           @namespace = []
           @def_depth = 0
           @block_depth = 0
+          @conditional_depth = 0
           super()
         end
 
@@ -766,7 +926,65 @@ module Audition
               receiver.is_a?(Prism::ClassVariableReadNode)
             @receiver_reads[receiver.object_id] = true
           end
+          arguments = node.arguments&.arguments || []
+          arguments.each { |argument| mark_escape(argument) }
           super
+        end
+
+        # `list = $handlers; list << h` mutates the value through
+        # an alias the receiver check cannot see; reads that flow
+        # into a local or a call argument are recorded so mutable
+        # values never get deep-frozen under them.
+        %i[
+          visit_local_variable_write_node
+          visit_local_variable_or_write_node
+          visit_local_variable_and_write_node
+          visit_local_variable_operator_write_node
+        ].each do |method|
+          define_method(method) do |node| # audition:disable unsafe-calls
+            mark_escape(node.value)
+            super(node)
+          end
+        end
+
+        # A write that only happens on some paths (`$verbose =
+        # true if ENV[...]`) must stay a variable: readers get nil
+        # on the untaken path, where a constant would raise
+        # NameError.
+        %i[
+          visit_if_node
+          visit_unless_node
+          visit_case_node
+          visit_case_match_node
+          visit_while_node
+          visit_until_node
+          visit_and_node
+          visit_or_node
+          visit_rescue_modifier_node
+        ].each do |method|
+          define_method(method) do |node| # audition:disable unsafe-calls
+            conditionally { super(node) }
+          end
+        end
+
+        def conditionally
+          @conditional_depth += 1
+          yield
+        ensure
+          @conditional_depth -= 1
+        end
+
+        def visit_begin_node(node)
+          if node.rescue_clause
+            @conditional_depth += 1
+            begin
+              super
+            ensure
+              @conditional_depth -= 1
+            end
+          else
+            super
+          end
         end
 
         def visit_class_node(node)
@@ -847,6 +1065,13 @@ module Audition
 
         private
 
+        def mark_escape(node)
+          return unless node.is_a?(Prism::GlobalVariableReadNode) ||
+            node.is_a?(Prism::ClassVariableReadNode)
+
+          @escaping_reads[node.object_id] = true
+        end
+
         def record_gvar(node, kind)
           name = node.name.to_s
           return if SKIP_GLOBALS.include?(name)
@@ -854,7 +1079,7 @@ module Audition
           @groups[name] << {
             node: node, kind: kind,
             assignable: @def_depth.zero? && @block_depth.zero? &&
-              @namespace.empty?
+              @namespace.empty? && @conditional_depth.zero?
           }
         end
 
@@ -864,7 +1089,8 @@ module Audition
           key = "#{@namespace.join("::")}/#{node.name}"
           @groups[key] << {
             node: node, kind: kind,
-            assignable: @def_depth.zero? && @block_depth.zero?
+            assignable: @def_depth.zero? && @block_depth.zero? &&
+              @conditional_depth.zero?
           }
         end
       end

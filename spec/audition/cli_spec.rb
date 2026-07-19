@@ -57,10 +57,10 @@ RSpec.describe Audition::CLI do
       path = File.join(dir, "consts.rb")
       File.write(path, "NAME = \"x\"\n")
 
-      status, out, = run(path, "--fix", "--static-only")
+      status, _, err = run(path, "--fix", "--static-only")
 
       expect(File.read(path)).to eq("NAME = \"x\".freeze\n")
-      expect(out).to include("fixed 1")
+      expect(err).to include("fixed 1")
       expect(status).to eq(0)
     end
   end
@@ -76,7 +76,7 @@ RSpec.describe Audition::CLI do
 
       _, out, = run(path, "--static-only")
 
-      expect(out).to match(/\d+ more with --fix-unsafe/)
+      expect(out).to match(/\d+ edits? with --fix-unsafe/)
     end
   end
 
@@ -89,13 +89,13 @@ RSpec.describe Audition::CLI do
         end
       RUBY
 
-      status, out, = run(path, "--fix-unsafe", "--static-only")
+      status, _, err = run(path, "--fix-unsafe", "--static-only")
 
       content = File.read(path)
       expect(content).to include(
         '@config ||= Ractor.make_shareable({ "a" => 1 })'
       )
-      expect(out).to include("fixed 1")
+      expect(err).to include("fixed 1")
       expect(status).to eq(0)
     end
   end
@@ -106,13 +106,46 @@ RSpec.describe Audition::CLI do
       source = "NAME = \"x\"\n"
       File.write(path, source)
 
-      status, out, = run(path, "--fix", "--dry-run",
+      status, _, err = run(path, "--fix", "--dry-run",
         "--static-only")
 
       expect(File.read(path)).to eq(source)
-      expect(out).to include("dry run")
-      expect(out).to include('NAME = "x".freeze')
+      expect(err).to include("dry run")
+      expect(err).to include('NAME = "x".freeze')
       expect(status).to eq(1)
+    end
+  end
+
+  it "keeps --format json parseable under --fix and --dry-run" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "consts.rb")
+      File.write(path, "NAME = \"x\"\n")
+
+      status, out, err = run(path, "--fix", "--dry-run",
+        "--static-only", "--format", "json")
+
+      expect(JSON.parse(out)["verdict"]).to eq("not_ready")
+      expect(err).to include("dry run")
+      expect(status).to eq(1)
+
+      status, out, err = run(path, "--fix", "--static-only",
+        "--format", "json")
+
+      expect(JSON.parse(out)["verdict"]).to eq("ready")
+      expect(err).to include("fixed 1")
+      expect(status).to eq(0)
+    end
+  end
+
+  it "says nothing to fix when --fix has no work" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "bad.rb")
+      File.write(path, "$x = 1\n")
+
+      _, _, err = run(path, "--fix", "--static-only")
+
+      expect(err).to include("nothing to fix")
+      expect(err).not_to include("fixed 0")
     end
   end
 
@@ -175,11 +208,12 @@ RSpec.describe Audition::CLI do
   it "sweeps a Gemfile.lock into a per-gem verdict table" do
     Dir.mktmpdir do |dir|
       lock = File.join(dir, "Gemfile.lock")
+      version = Gem::Specification.find_by_name("rspec").version
       File.write(lock, <<~LOCK)
         GEM
           remote: https://rubygems.org/
           specs:
-            rspec (3.13.2)
+            rspec (#{version})
 
         PLATFORMS
           ruby
@@ -193,6 +227,40 @@ RSpec.describe Audition::CLI do
       expect(out).to include("rspec")
       expect(out).to include("not ready")
       expect(status).to eq(1)
+    end
+  end
+
+  it "applies --fail-on to sweep exit codes" do
+    Dir.mktmpdir do |dir|
+      lock = File.join(dir, "Gemfile.lock")
+      File.write(lock, <<~LOCK)
+        GEM
+          remote: https://rubygems.org/
+          specs:
+            warny (1.0.0)
+
+        PLATFORMS
+          ruby
+
+        DEPENDENCIES
+          warny
+      LOCK
+      row = Audition::BundleSweep::Row.new(
+        name: "warny", version: "1.0.0", verdict: :risky,
+        errors: 0, dep_errors: 0, warnings: 2, infos: 0,
+        fixable: 0, status: "ok"
+      )
+      sweeper = instance_double(Audition::BundleSweep)
+      allow(sweeper).to receive(:rows).and_return([row])
+      allow(Audition::BundleSweep).to receive(:new)
+        .and_return(sweeper)
+
+      default_status, = run(lock, "--static-only")
+      strict_status, = run(lock, "--static-only",
+        "--fail-on", "warning")
+
+      expect(default_status).to eq(0)
+      expect(strict_status).to eq(1)
     end
   end
 
@@ -210,6 +278,54 @@ RSpec.describe Audition::CLI do
       expect(out).to include("1 fixed")
       expect(out).to include("1 introduced")
       expect(out).to include("$c")
+    end
+  end
+
+  it "rejects a missing --compare file before auditing" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "app.rb")
+      File.write(path, "$a = 1\n")
+
+      status, out, err = run(path, "--static-only",
+        "--compare", File.join(dir, "nope.json"))
+
+      expect(status).to eq(2)
+      expect(err).to include("cannot read")
+      expect(out).to be_empty
+    end
+  end
+
+  it "compares across absolute and relative target forms" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "app.rb")
+      File.write(path, "$a = 1\n")
+      _, old_json, = run(path, "--static-only", "--format", "json")
+      File.write(File.join(dir, "old.json"), old_json)
+
+      out = Dir.chdir(dir) do
+        _, o, = run("app.rb", "--static-only",
+          "--compare", "old.json")
+        o
+      end
+
+      expect(out).to include("0 fixed")
+      expect(out).to include("0 introduced")
+    end
+  end
+
+  it "does not count baselined findings as fixed in --compare" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "app.rb")
+      File.write(path, "$a = 1\n")
+      _, old_json, = run(path, "--static-only", "--format", "json")
+      old_path = File.join(dir, "old.json")
+      File.write(old_path, old_json)
+      run(dir, "--write-baseline", "--static-only")
+
+      _, out, = run(dir, "--static-only", "--compare", old_path)
+
+      expect(out).to include("0 fixed")
+      expect(out).to include("0 introduced")
     end
   end
 

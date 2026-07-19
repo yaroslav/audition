@@ -135,6 +135,9 @@ module Audition
     end
 
     def audit(target, options)
+      # Read the comparison report up front: a missing or broken
+      # file should be a fast usage error, not a post-audit crash.
+      compare = load_compare(options[:compare])
       config = Config.load(target.root)
       options = apply_config(options, config)
       directives = Directives.new
@@ -162,6 +165,7 @@ module Audition
         return 0
       end
 
+      visible = all
       all, baselined = apply_baseline(all, target, options)
 
       report = Report.new(
@@ -173,34 +177,43 @@ module Audition
         baselined: baselined
       )
       emit(report, options)
-      if options[:compare] && options[:format] != :json
-        emit_comparison(report, options)
+      if compare && options[:format] != :json
+        emit_comparison(compare, visible, target, options)
       end
       exit_code(report, options)
     end
 
-    def emit_comparison(report, options)
-      old = begin
-        JSON.parse(File.read(options[:compare]))
-      rescue JSON::ParserError, SystemCallError => e
-        raise Error, "cannot read #{options[:compare]}: #{e.message}"
-      end
+    def load_compare(path)
+      return nil unless path
 
+      JSON.parse(File.read(path))
+    rescue JSON::ParserError, SystemCallError => e
+      raise Error, "cannot read #{path}: #{e.message}"
+    end
+
+    # Fingerprints are root-relative on both sides, so an absolute
+    # old run compares cleanly against a relative new run. The
+    # comparison sees pre-baseline visible findings: a baselined
+    # finding still exists and must not count as fixed.
+    def emit_comparison(old, findings, target, options)
+      old_root = old.dig("target", "root").to_s
       budget = Hash.new(0)
       old.fetch("findings", []).each do |f|
-        budget[[f["check"], f["path"], f["message"]]] += 1
+        key = [f["check"], relativize(f["path"].to_s, old_root),
+          f["message"]]
+        budget[key] += 1
       end
       total_old = budget.values.sum
 
-      introduced = report.findings.reject do |f|
-        key = [f.check, f.path, f.message]
+      introduced = findings.reject do |f|
+        key = [f.check, relativize(f.path.to_s, target.root),
+          f.message]
         next false unless budget[key].positive?
 
         budget[key] -= 1
         true
       end
-      fixed = total_old -
-        (report.findings.size - introduced.size)
+      fixed = total_old - (findings.size - introduced.size)
 
       s = style(options)
       @stdout.puts(
@@ -211,6 +224,12 @@ module Audition
       introduced.each do |f|
         @stdout.puts("    + #{f.message} (#{f.location})")
       end
+    end
+
+    def relativize(path, root)
+      return path if root.empty?
+
+      path.delete_prefix("#{root}/")
     end
 
     def apply_config(options, config)
@@ -247,6 +266,8 @@ module Audition
       per_file + Static::GraphAudit.new.analyze_paths(files)
     end
 
+    # Fix chatter goes to stderr: stdout carries the report, which
+    # must stay parseable under --format json.
     def run_fix(target, findings, options)
       fixer = Fixer.new(unsafe: options[:unsafe])
       if options[:dry_run]
@@ -256,30 +277,33 @@ module Audition
 
       applied = fixer.apply(findings)
       total = applied.values.sum
-      @stdout.puts(
+      if total.zero?
+        @stderr.puts("nothing to fix")
+        return findings
+      end
+
+      @stderr.puts(
         "fixed #{total} finding(s) in #{applied.size} file(s)"
       )
-      return findings unless total.positive?
-
       filter(static_findings(target, Config.load(target.root)),
         Directives.new, Config.load(target.root))
     end
 
     def render_preview(previews, options)
-      s = style(options)
+      s = style(options, io: @stderr)
       previews.each do |preview|
-        @stdout.puts(s.bold(preview[:path]))
+        @stderr.puts(s.bold(preview[:path]))
         preview[:hunks].each do |hunk|
-          @stdout.puts("  @ line #{hunk[:line]}")
+          @stderr.puts("  @ line #{hunk[:line]}")
           hunk[:old].each_line do |line|
-            @stdout.puts(s.red("  - #{line.chomp}"))
+            @stderr.puts(s.red("  - #{line.chomp}"))
           end
           hunk[:new].each_line do |line|
-            @stdout.puts(s.green("  + #{line.chomp}"))
+            @stderr.puts(s.green("  + #{line.chomp}"))
           end
         end
       end
-      @stdout.puts("dry run: no files were changed")
+      @stderr.puts("dry run: no files were changed")
     end
 
     def prober(options)
@@ -294,11 +318,11 @@ module Audition
       end
     end
 
-    def style(options)
+    def style(options, io: @stdout)
       if options[:plain]
         Report::Style.new(color: false, hyperlinks: false)
       else
-        Report::Style.detect(io: @stdout)
+        Report::Style.detect(io: io)
       end
     end
 
@@ -340,7 +364,19 @@ module Audition
       else
         emit_sweep_table(rows)
       end
-      (rows.any? { |r| r.verdict == :not_ready }) ? 1 : 0
+      threshold = SEVERITIES.fetch(options[:fail_on])
+      (rows.any? { |r| row_failed?(r, threshold) }) ? 1 : 0
+    end
+
+    # Same contract as a direct audit: a row fails when it carries
+    # findings at or above --fail-on; not-ready rows always fail.
+    def row_failed?(row, threshold)
+      return true if row.verdict == :not_ready
+
+      hits = row.errors + row.dep_errors
+      hits += row.warnings if threshold <= SEVERITIES[:warning]
+      hits += row.infos if threshold <= SEVERITIES[:info]
+      hits.positive?
     end
 
     def sweep_progress
@@ -383,6 +419,7 @@ module Audition
             "errors" => r.errors,
             "dependency_errors" => r.dep_errors,
             "warnings" => r.warnings,
+            "infos" => r.infos,
             "fixable" => r.fixable,
             "status" => r.status
           }

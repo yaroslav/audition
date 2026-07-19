@@ -8,7 +8,7 @@ RSpec.describe Audition::Fixer do
       path = File.join(dir, "consts.rb")
       File.write(path, <<~RUBY)
         NAME = "audition"
-        CACHE = {}
+        CACHE = "x"
       RUBY
 
       findings = Audition::Static::Analyzer.new(
@@ -19,7 +19,7 @@ RSpec.describe Audition::Fixer do
       expect(applied).to eq(path => 2)
       expect(File.read(path)).to eq(<<~RUBY)
         NAME = "audition".freeze
-        CACHE = Ractor.make_shareable({})
+        CACHE = "x".freeze
       RUBY
     end
   end
@@ -66,6 +66,32 @@ RSpec.describe Audition::Fixer do
       expect(applied).to eq(path => 1)
       expect(File.read(path))
         .to eq("A = Ractor.make_shareable([1])\n")
+    end
+  end
+
+  it "orders same-offset inserts by plan position" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "many.rb")
+      File.write(path, "ROOT = 1\n")
+      findings = (1..48).map do |n|
+        Audition::Finding.new(
+          check: "t", severity: :error, message: "m", why: "w",
+          fix: "f", path: path, line: 1,
+          autofix: Audition::Autofix.new(
+            start_offset: n % 3, end_offset: n % 3,
+            replacement: "<#{n}>"
+          )
+        )
+      end
+
+      described_class.new.apply(findings)
+
+      groups = Hash.new { |h, k| h[k] = [] }
+      (1..48).each { |n| groups[n % 3] << "<#{n}>" }
+      expected = groups[0].reverse.join + "R" +
+        groups[1].reverse.join + "O" +
+        groups[2].reverse.join + "OT = 1\n"
+      expect(File.read(path)).to eq(expected)
     end
   end
 end

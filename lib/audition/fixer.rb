@@ -61,8 +61,12 @@ module Audition
         edits = build_edits(path, source, group)
         next if edits.empty?
 
-        Plan.new(path: path, source: source,
-          edits: edits.sort_by { |e| -e.start_offset })
+        # Applied bottom-up; the explicit index keeps same-offset
+        # inserts in plan order (sort_by is not stable).
+        ordered = edits.each_with_index.sort_by do |edit, index|
+          [-edit.start_offset, index]
+        end.map(&:first)
+        Plan.new(path: path, source: source, edits: ordered)
       end
     end
 
@@ -75,8 +79,10 @@ module Audition
         file = Static::SourceFile.new(source: source, path: path)
         if file.valid_syntax?
           magic = Rewriters::MagicComments.plan(file, group)
-          planned += Rewriters::Memoization.plan(file, group)
-          planned += Rewriters::WriteOnce.plan(file, group)
+          planned = Rewriters.resolve(
+            Rewriters::Memoization.plan(file, group) +
+            Rewriters::WriteOnce.plan(file, group)
+          )
         end
       end
 

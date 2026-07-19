@@ -2,6 +2,24 @@
 
 ## [0.2.1] - Unreleased
 
+- Adversarial hardening pass: four independent reviews of the
+  fixer, checks, dynamic layer, and CLI produced 38 verified
+  findings, all fixed with regression specs. Highlights: probe
+  timeouts kill the whole process group and cannot be defeated
+  by spawned children; binary bytes anywhere in target output
+  or exception messages can no longer crash a run; pragmas are
+  parsed from real comments only and all pragmas on a line are
+  honored; magic comments follow Ruby's position and case rules;
+  explicit `frozen_string_literal: false` is never overridden;
+  write-once conversion refuses conditional writes, inherited
+  class variables, alias-escaping reads, and name collisions;
+  nested edits can no longer swallow a companion group's
+  rewrite; the sweep honors directives, per-gem config,
+  `--fail-on`, and locked gem versions; excludes follow proper
+  glob semantics; `--compare` is path-form-proof; JSON output
+  stays parseable under `--fix`; and fixable counts only count
+  what `--fix` alone would fix.
+
 - New unsafe rewrite for config setters: a singleton setter
   assigning its bare parameter (`@backend = value`) becomes
   `@backend = (Ractor.make_shareable(value) rescue value)`, the

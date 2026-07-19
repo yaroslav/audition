@@ -680,4 +680,378 @@ RSpec.describe "unsafe rewriters" do
       expect(File.read(path)).to eq(source)
     end
   end
+
+  it "honors an explicit frozen_string_literal: false opt-out" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "optout.rb", <<~RUBY)
+        # frozen_string_literal: false
+
+        def compute_thing = Object.new
+
+        NAME = "audition"
+        DYNAMIC = compute_thing
+
+        def greeting
+          text = "hello"
+          text << " world"
+        end
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).not_to include("frozen_string_literal: true")
+      expect(content).to include(%(NAME = "audition".freeze))
+
+      script = <<~RUBY
+        require #{path.inspect}
+        raise "frozen" unless greeting == "hello world"
+        print "opt-out-respected"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("opt-out-respected"), err
+    end
+  end
+
+  it "inserts no magic comment when only a mutation is flagged" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        Registry::TABLE << :entry
+      RUBY
+      path = write(dir, "mutation.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+    end
+  end
+
+  it "leaves conditionally-written globals alone" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        $strict = true if ENV["STRICT"]
+
+        def strict? = $strict
+      RUBY
+      path = write(dir, "strict.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+    end
+  end
+
+  it "keeps class variables shared with same-file subclasses" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        class Parent
+          @@default = "unset"
+
+          def value = @@default
+        end
+
+        class Child < Parent
+          def child_value = @@default
+        end
+      RUBY
+      path = write(dir, "inherit.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+
+      script = <<~RUBY
+        require #{path.inspect}
+        raise "broken" unless Child.new.child_value == "unset"
+        print "inheritance-intact"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("inheritance-intact"), err
+    end
+  end
+
+  it "keeps globals that escape through a local alias" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        $handlers = ["default"]
+
+        def register(handler)
+          list = $handlers
+          list << handler
+        end
+      RUBY
+      path = write(dir, "handlers.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+
+      script = <<~RUBY
+        require #{path.inspect}
+        register("extra")
+        raise "frozen" unless $handlers == ["default", "extra"]
+        print "alias-safe"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("alias-safe"), err
+    end
+  end
+
+  it "skips memo values that contain another converted group" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "nested.rb", <<~RUBY)
+        module Host
+          def self.derived
+            @derived ||= [@base]
+          end
+
+          def self.base
+            @base ||= [1].map { |x| x }
+          end
+        end
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).to include(
+        'Ractor.store_if_absent(:"Host/@base") ' \
+        "{ [1].map { |x| x } }"
+      )
+      expect(content).to include(
+        '@derived ||= [Ractor.current[:"Host/@base"]]'
+      )
+
+      script = <<~RUBY
+        Warning[:experimental] = false
+        require #{path.inspect}
+        raise "base" unless Host.base == [1]
+        raise "stale" unless Host.derived == [[1]]
+        print "nested-intact"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("nested-intact"), err
+    end
+  end
+
+  it "lets nested global conversions win over enclosing memos" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "limits.rb", <<~RUBY)
+        $limit = [10]
+
+        module Host
+          def self.config
+            @config ||= {max: $limit}
+          end
+        end
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).to include(
+        "LIMIT = Ractor.make_shareable([10])"
+      )
+      expect(content).to include("@config ||= {max: LIMIT}")
+      expect(content).not_to include("$limit")
+
+      script = <<~RUBY
+        require #{path.inspect}
+        raise "stale" unless Host.config == {max: [10]}
+        print "global-intact"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("global-intact"), err
+    end
+  end
+
+  it "keeps non-guard defined? probes meaningful" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        module Cache
+          def self.entries
+            @entries ||= [1, 2].map { |x| x * 2 }
+          end
+
+          def self.loaded? = defined?(@entries) ? true : false
+        end
+      RUBY
+      path = write(dir, "probe.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+
+      script = <<~RUBY
+        require #{path.inspect}
+        raise "phantom" if Cache.loaded?
+        Cache.entries
+        raise "missing" unless Cache.loaded?
+        print "probe-intact"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("probe-intact"), err
+    end
+  end
+
+  it "keeps guarded memos whose write is not the method tail" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        module Boot
+          def self.setup
+            return @setup if defined?(@setup)
+
+            @setup = [1, 2].map { |x| x }
+            log_setup
+          end
+
+          def self.log_setup = :logged
+        end
+      RUBY
+      path = write(dir, "boot.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+    end
+  end
+
+  it "converts guarded writes followed by a bare memo read" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "tail.rb", <<~RUBY)
+        module Boot
+          def self.config
+            return @config if defined?(@config)
+
+            @config = [1, 2].map { |x| x }
+            @config
+          end
+        end
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).not_to include("defined?")
+      expect(content).to include(
+        'Ractor.store_if_absent(:"Boot/@config") ' \
+        "{ [1, 2].map { |x| x } }"
+      )
+      expect(content).to include('Ractor.current[:"Boot/@config"]')
+
+      script = <<~RUBY
+        Warning[:experimental] = false
+        require #{path.inspect}
+        raise "cold" unless Boot.config == [1, 2]
+        raise "warm" unless Boot.config == [1, 2]
+        print "tail-read-works"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("tail-read-works"), err
+    end
+  end
+
+  it "keeps instance ivars inside class << self modules alone" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        class Api
+          def self.token
+            @token ||= compute.map { |x| x }
+          end
+
+          class << self
+            module Helper
+              def cache
+                @cache ||= calc.map { |x| x }
+              end
+            end
+          end
+        end
+      RUBY
+      path = write(dir, "api.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+    end
+  end
+
+  it "gives colliding constant names to only the first variable" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "max.rb", <<~RUBY)
+        $max = 10
+        $MAX = 20
+
+        def low = $max
+
+        def high = $MAX
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).to include("MAX = 10")
+      expect(content).to include("$MAX = 20")
+      expect(content).to include("def high = $MAX")
+
+      script = <<~RUBY
+        require #{path.inspect}
+        raise "low" unless low == 10
+        raise "high" unless high == 20
+        print "no-collision"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("no-collision"), err
+    end
+  end
+
+  it "keeps setter values mutable when mutated via the reader" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        module Config
+          def self.options = @options
+
+          def self.options=(value)
+            @options = value
+          end
+
+          def self.set(key, value)
+            options[key] = value
+          end
+        end
+      RUBY
+      path = write(dir, "options.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+
+      script = <<~RUBY
+        require #{path.inspect}
+        Config.options = {}
+        Config.set(:mode, :fast)
+        raise "frozen" unless Config.options == {mode: :fast}
+        print "reader-mutation-safe"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("reader-mutation-safe"), err
+    end
+  end
+
+  it "never wraps operator setter defs" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        module Registry
+          def self.[]=(key, value)
+            @entries = value
+          end
+        end
+      RUBY
+      path = write(dir, "brackets.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+    end
+  end
 end

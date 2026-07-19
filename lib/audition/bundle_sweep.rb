@@ -11,7 +11,7 @@ module Audition
     CONCURRENCY = 4
 
     Row = Data.define(:name, :version, :verdict, :errors,
-      :dep_errors, :warnings, :fixable, :status)
+      :dep_errors, :warnings, :infos, :fixable, :status)
 
     VERDICT_ORDER = {
       :not_ready => 0, :blocked => 1, :risky => 2, :ready => 3, nil => 4
@@ -66,38 +66,85 @@ module Audition
       parser.specs.map { |s| [s.name, s.version.to_s] }.uniq
     end
 
+    # Mirrors CLI#audit: the locked version's own spec is audited,
+    # and findings pass through the gem's inline pragmas and its
+    # .audition.yml (exclude plus checks.disable) so a sweep row
+    # agrees with a direct audit of the same gem.
     def audit_gem(name, version)
-      target = Target.detect(name)
-      findings = static_findings(target)
+      spec = Gem::Specification.find_by_name(name, version)
+      target = gem_target(spec)
+      config = Config.load(target.root)
+      directives = Directives.new
+      findings = filter(static_findings(target, config),
+        directives, config)
       results = dynamic_results(target)
+      findings += filter(results.flat_map(&:findings),
+        directives, config)
       report = Report.new(
         target_type: :gem,
         target_root: target.root,
-        findings: findings + results.flat_map(&:findings),
+        findings: findings,
         dynamic_results: results
       )
       counts = report.counts
       Row.new(
         name: name, version: version, verdict: report.verdict,
         errors: counts[:error], dep_errors: counts[:dep_error],
-        warnings: counts[:warning], fixable: counts[:fixable],
-        status: "ok"
+        warnings: counts[:warning], infos: counts[:info],
+        fixable: counts[:fixable], status: "ok"
       )
-    rescue Error
+    rescue Gem::MissingSpecError
+      failed_row(name, version, "not installed")
+    rescue => e
+      failed_row(name, version, "failed: #{e.class}")
+    end
+
+    def failed_row(name, version, status)
       Row.new(
         name: name, version: version, verdict: nil, errors: 0,
-        dep_errors: 0, warnings: 0, fixable: 0,
-        status: "not installed"
+        dep_errors: 0, warnings: 0, infos: 0, fixable: 0,
+        status: status
       )
+    end
+
+    def gem_target(spec)
+      root = spec.gem_dir
+      Target.new(
+        type: :gem,
+        root: root,
+        ruby_files: spec.require_paths.flat_map do |rp|
+          ruby_files_under(File.join(root, rp))
+        end,
+        entry: {mode: :require, feature: spec.name, root: root}
+      )
+    end
+
+    # Same glob discipline as Target: skip vendored trees and
+    # dotdirs.
+    def ruby_files_under(dir)
+      Dir[File.join(dir, "**", "*.rb")].reject do |path|
+        path.delete_prefix("#{dir}/").split("/").any? do |part|
+          Target::EXCLUDED_DIRS.include?(part) ||
+            part.start_with?(".")
+        end
+      end.sort
+    end
+
+    def filter(findings, directives, config)
+      directives.filter(findings).reject do |finding|
+        config.check_disabled?(finding.check)
+      end
     end
 
     # Worker threads already parallelize across gems; per-gem
     # scanning stays serial to avoid a Ractor storm.
-    def static_findings(target)
+    def static_findings(target, config)
+      files = target.ruby_files.reject do |file|
+        config.excluded?(file.delete_prefix("#{target.root}/"))
+      end
       per_file = Static::Analyzer.new
-        .analyze_paths(target.ruby_files, workers: 1)
-      per_file + Static::GraphAudit.new
-        .analyze_paths(target.ruby_files)
+        .analyze_paths(files, workers: 1)
+      per_file + Static::GraphAudit.new.analyze_paths(files)
     end
 
     def dynamic_results(target)
