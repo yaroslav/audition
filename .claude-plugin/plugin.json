@@ -1,0 +1,20 @@
+{
+  "name": "audition",
+  "description": "Ractor-readiness auditing for Ruby: check and fix gems, scripts, Rack and Rails apps with the audition gem",
+  "version": "1.0.0",
+  "author": {
+    "name": "Yaroslav Markin",
+    "email": "yaroslav@markin.net"
+  },
+  "homepage": "https://github.com/yaroslav/audition",
+  "repository": "https://github.com/yaroslav/audition",
+  "license": "MIT",
+  "keywords": [
+    "ruby",
+    "ractor",
+    "concurrency",
+    "static-analysis",
+    "autofix",
+    "skills"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "name": "audition",
+  "description": "Audition: Ractor-readiness prober and fixer for Ruby",
+  "owner": {
+    "name": "Yaroslav Markin",
+    "email": "yaroslav@markin.net"
+  },
+  "plugins": [
+    {
+      "name": "audition",
+      "description": "Ractor-readiness auditing for Ruby: check and fix gems, scripts, Rack and Rails apps with the audition gem",
+      "version": "1.0.0",
+      "source": "./",
+      "author": {
+        "name": "Yaroslav Markin",
+        "email": "yaroslav@markin.net"
+      }
+    }
+  ]
+}

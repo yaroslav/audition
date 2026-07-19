@@ -113,6 +113,7 @@ proxying) and its verified semantics.
 - [Usage](#usage)
 - [Adopting incrementally](#adopting-incrementally)
 - [What it catches](#what-it-catches)
+- [Agent skill](#agent-skill)
 - [Extending](#extending)
 - [Development](#development)
 - [License](#license)
@@ -244,6 +245,28 @@ Dynamic, on the live object graph:
   under concurrency.
 - Boots Rails (`config/environment.rb`), eager-loads, and sweeps
   the application's namespaces.
+
+## Agent skill
+
+This repository ships a `ractor-readiness` skill that teaches
+coding agents (Claude Code and friends) the full audition
+workflow: audit, fix tiers, suite-parity verification, and
+incremental adoption. It lives in
+[skills/ractor-readiness/SKILL.md](skills/ractor-readiness/SKILL.md).
+
+Install into Claude Code as a plugin:
+
+```
+/plugin marketplace add yaroslav/audition
+/plugin install audition@audition
+```
+
+Or install the skill with the
+[skills CLI](https://github.com/vercel-labs/skills):
+
+```console
+$ npx skills add yaroslav/audition
+```
 
 ## Extending
 
