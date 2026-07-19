@@ -361,6 +361,25 @@ RSpec.describe "unsafe rewriters" do
     end
   end
 
+  it "only wraps writes inside actual setter methods" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        class Router
+          def self.get(path)
+            saved = @conditions.dup
+            route(path)
+            @conditions = saved
+          end
+        end
+      RUBY
+      path = write(dir, "router.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+    end
+  end
+
   it "leaves computed setter values alone" do
     Dir.mktmpdir do |dir|
       source = <<~RUBY

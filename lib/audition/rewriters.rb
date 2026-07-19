@@ -261,6 +261,9 @@ module Audition
       def self.setter_edits(ops)
         ops.filter_map do |op|
           next unless op[:kind] == :write
+          # Only genuine setters: a plain method restoring a saved
+          # local (sinatra's route conditions) must stay untouched.
+          next unless op[:def_name].to_s.end_with?("=")
 
           value = op[:node].value
           next unless value.is_a?(Prism::LocalVariableReadNode)
