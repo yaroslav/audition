@@ -128,6 +128,20 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     expect(mutations.map(&:line)).to contain_exactly(2, 4)
   end
 
+  it "handles Proc.new and proc call forms without crashing" do
+    findings = findings_for(<<~RUBY)
+      module Notify
+        RAISE_NOTIFIER = Proc.new { |err| raise err }
+        SILENT = proc {}
+      end
+    RUBY
+
+    expect(findings.size).to eq(2)
+    expect(findings).to all(
+      have_attributes(check: "mutable-constants")
+    )
+  end
+
   it "gates proc wraps on capture-free lambdas in a namespace" do
     findings = findings_for(<<~RUBY)
       TOP = ->(x) { x.to_s }

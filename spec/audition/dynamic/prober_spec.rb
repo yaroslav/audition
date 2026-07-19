@@ -158,6 +158,25 @@ RSpec.describe Audition::Dynamic::Prober do
       end
     end
 
+    it "falls back to the slashed feature for dashed gem names" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/acme/widgets.rb", <<~RUBY)
+          module Acme
+            module Widgets
+            end
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "acme-widgets",
+          load_paths: [File.join(dir, "lib")]
+        )
+
+        expect(result.passed).to be(true)
+      end
+    end
+
     it "notes shareable class-level state at info level" do
       Dir.mktmpdir do |dir|
         write(dir, "lib/warmed_lib.rb", <<~RUBY)

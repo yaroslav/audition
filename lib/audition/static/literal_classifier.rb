@@ -100,6 +100,7 @@ module Audition
           name = const_name(receiver)
           return :sync_primitive if SYNC_PRIMITIVES.include?(name)
           return :shareable if SHAREABLE_FACTORIES.include?(name)
+          return :proc if name == "Proc" && node.block
           # Hash.new retains its block as the default proc;
           # Array.new only uses its block to build elements.
           return :default_proc if name == "Hash" && node.block

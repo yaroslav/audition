@@ -125,7 +125,17 @@ module AuditionHarness
       $LOAD_PATH.unshift(lp) # audition:disable global-variables
     end
     before = Object.constants
-    require payload.fetch("feature") # audition:disable runtime-require
+    feature = payload.fetch("feature")
+    begin
+      require feature # audition:disable runtime-require
+    rescue LoadError
+      # Dashed gem names conventionally ship slashed entry files
+      # (rspec-mocks provides rspec/mocks).
+      slashed = feature.tr("-", "/")
+      raise if slashed == feature
+
+      require slashed # audition:disable runtime-require
+    end
     scan(Object.constants - before, root: payload["root"])
   end
 

@@ -149,10 +149,11 @@ module Audition
             # captures locals or its self is unshareable (any
             # top-level lambda); only capture-free lambdas inside
             # a class or module body get the wrap.
+            body = proc_body(value)
             wrappable = fix_ok && namespaced?(node) &&
-              (value.body.nil? ||
+              (body.nil? ||
                 RactorIsolation::CaptureScanner
-                  .scan(value.body).empty?)
+                  .scan(body).empty?)
             flag(node, :proc_constant, name: name,
               autofix: wrappable ? wrap_make_shareable(value) : nil)
           when :default_proc
@@ -164,6 +165,17 @@ module Audition
           bare = name.split("::").last
           file.mutated_constants.any? do |mutated|
             mutated == name || mutated.split("::").last == bare
+          end
+        end
+
+        # A proc value is a LambdaNode (`->`) or a CallNode
+        # (`proc { }`, `lambda { }`, `Proc.new { }`); the body
+        # lives in different places (rspec-expectations crashed
+        # the CallNode path).
+        def proc_body(value)
+          case value
+          when Prism::LambdaNode then value.body
+          when Prism::CallNode then value.block&.body
           end
         end
 
