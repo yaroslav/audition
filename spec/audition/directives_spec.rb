@@ -27,6 +27,32 @@ RSpec.describe Audition::Directives do
     end
   end
 
+  it "ignores pragma-shaped text inside string literals" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "s.rb")
+      File.write(path, <<~RUBY)
+        $a = "usage:  # audition:disable global-variables "
+      RUBY
+
+      kept = described_class.new.filter([finding(path: path, line: 1)])
+
+      expect(kept.map(&:line)).to eq([1])
+    end
+  end
+
+  it "honors every pragma on a line" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "m.rb")
+      File.write(path, <<~RUBY)
+        $a = 1 # audition:disable unsafe-calls # audition:disable global-variables
+      RUBY
+
+      kept = described_class.new.filter([finding(path: path, line: 1)])
+
+      expect(kept).to be_empty
+    end
+  end
+
   it "supports comma-separated check lists" do
     Dir.mktmpdir do |dir|
       path = File.join(dir, "x.rb")

@@ -25,11 +25,22 @@ module Audition
 
       def root = parse_result.value
 
+      # Ruby matches magic-comment keys and values
+      # case-insensitively and ignores magic comments that appear
+      # after the first statement (verified on 4.0); Prism reports
+      # them all, so both rules are applied here.
       def magic_comment(key)
+        limit = first_statement_offset
         comment = parse_result.magic_comments.find do |mc|
-          mc.key_loc.slice == key
+          mc.key_loc.slice.downcase == key &&
+            mc.key_loc.start_offset < limit
         end
-        comment&.value_loc&.slice
+        comment&.value_loc&.slice&.downcase
+      end
+
+      def first_statement_offset
+        first = root.statements.body.first
+        first ? first.location.start_offset : source.bytesize
       end
 
       # String literals in this file are frozen (and therefore
@@ -48,7 +59,9 @@ module Audition
       end
 
       def line_at(number)
-        @lines ||= source.lines
+        @lines ||= source.lines.map do |line|
+          line.dup.force_encoding(Encoding::UTF_8).scrub
+        end
         @lines[number - 1]&.strip
       end
 
@@ -96,6 +109,17 @@ module Audition
         []= << push unshift concat merge! replace
       ].freeze
 
+      # Index writes are their own node types, not calls:
+      # `COUNTS[k] += 1` is IndexOperatorWriteNode and
+      # `CACHE[k] ||= v` is IndexOrWriteNode; missing them let a
+      # `.freeze` autofix produce FrozenError at runtime.
+      INDEX_WRITES = [
+        Prism::IndexOperatorWriteNode,
+        Prism::IndexOrWriteNode,
+        Prism::IndexAndWriteNode,
+        Prism::IndexTargetNode
+      ].freeze
+
       # @return [Array<String>] names of constants that receive a
       #   mutator call somewhere in this file
       def mutated_constants
@@ -105,14 +129,19 @@ module Audition
           until queue.empty?
             node = queue.shift
             queue.concat(node.child_nodes.compact)
-            next unless node.is_a?(Prism::CallNode)
-            next unless CONST_MUTATORS.include?(node.name)
+            receiver =
+              if node.is_a?(Prism::CallNode) &&
+                  CONST_MUTATORS.include?(node.name)
+                node.receiver
+              elsif INDEX_WRITES.any? { |type| node.is_a?(type) }
+                node.receiver
+              end
 
-            case node.receiver
+            case receiver
             when Prism::ConstantReadNode
-              names << node.receiver.name.to_s
+              names << receiver.name.to_s
             when Prism::ConstantPathNode
-              names << node.receiver.location.slice
+              names << receiver.location.slice
             end
           end
           names.uniq
@@ -136,8 +165,10 @@ module Audition
           newline = raw.index("\n")
           offset = newline ? newline + 1 : raw.bytesize
         end
+        limit = first_statement_offset
         after_magic = parse_result.magic_comments.filter_map do |mc|
-          next unless MAGIC_KEYS.include?(mc.key_loc.slice)
+          next unless MAGIC_KEYS.include?(mc.key_loc.slice.downcase)
+          next unless mc.key_loc.start_offset < limit
 
           newline = raw.index("\n", mc.value_loc.end_offset)
           newline ? newline + 1 : raw.bytesize
