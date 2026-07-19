@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.0] - Unreleased
+## [0.2.1] - Unreleased
 
 - Battle-tested against mail, liquid, sinatra, faraday, and
   money; suites pass at baseline parity after `--fix-unsafe`
