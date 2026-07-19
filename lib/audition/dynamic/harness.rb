@@ -55,13 +55,27 @@ module AuditionHarness
       end
     out.puts(JSON.generate(result))
   rescue Exception => e
-    out.puts(JSON.generate("error" => describe_error(e)))
+    begin
+      out.puts(JSON.generate("error" => describe_error(e)))
+    rescue Exception
+      out.puts('{"error":{"class":"HarnessFailure",' \
+               '"message":"unreportable error"}}')
+    end
   end
 
+  # Exception messages can carry arbitrary bytes (C extensions,
+  # binary filenames); unscrubbed they blow up JSON.generate
+  # inside the rescue and the harness dies without output.
   def describe_error(error)
     root = unwrap(error)
-    {"class" => root.class.name,
-     "message" => root.message.to_s[0, 500]}
+    {"class" => scrub(root.class.name.to_s),
+     "message" => scrub(root.message.to_s)[0, 500]}
+  end
+
+  def scrub(text)
+    text.dup.force_encoding(Encoding::UTF_8).scrub
+  rescue Exception
+    "(unprintable)"
   end
 
   def unwrap(error)
@@ -192,7 +206,9 @@ module AuditionHarness
     rescue Exception
       nil
     end
-    own = root.nil? || path.nil? || path.start_with?(root)
+    # The separator matters: /x/app must not claim /x/app-helpers.
+    own = root.nil? || path.nil? || path == root ||
+      path.start_with?(root + File::SEPARATOR)
     {"path" => path, "line" => line, "own" => own}
   end
 

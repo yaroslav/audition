@@ -12,6 +12,77 @@ RSpec.describe Audition::Dynamic::Prober do
     path
   end
 
+  describe "hostile subprocess behavior" do
+    it "is not held hostage by children the target spawns" do
+      Dir.mktmpdir do |dir|
+        path = write(dir, "spawner.rb", <<~RUBY)
+          pid = spawn("sleep", "20")
+          Process.detach(pid)
+        RUBY
+
+        fast = described_class.new(timeout: 5)
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        result = fast.probe(mode: :script, path: path)
+        elapsed =
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        expect(result.passed).to be(true)
+        expect(elapsed).to be < 15
+      end
+    end
+
+    it "reports binary exception messages instead of crashing" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/binboom.rb", <<~RUBY)
+          message = (+"boom ").force_encoding("ASCII-8BIT")
+          message << 0xFF << 0xFE
+          raise RuntimeError, message
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "binboom",
+          load_paths: [File.join(dir, "lib")]
+        )
+
+        expect(result.passed).to be(false)
+        expect(result.findings.first.message)
+          .to include("could not load target")
+      end
+    end
+
+    it "attributes sibling directories with a shared prefix as deps" do
+      Dir.mktmpdir do |dir|
+        write(dir, "app/lib/own_app.rb", <<~RUBY)
+          require "helper_dep"
+          module OwnApp
+          end
+        RUBY
+        write(dir, "app-helpers/lib/helper_dep.rb", <<~RUBY)
+          module HelperDep
+            DIRTY = [1, 2, 3]
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "own_app",
+          load_paths: [
+            File.join(dir, "app/lib"),
+            File.join(dir, "app-helpers/lib")
+          ],
+          root: File.join(dir, "app")
+        )
+
+        dirty = result.findings.find do |f|
+          f.message.include?("DIRTY")
+        end
+        expect(dirty.dependency?).to be(true)
+        expect(result.passed).to be(true)
+      end
+    end
+  end
+
   describe "script probing" do
     it "reports the real IsolationError for a Ractor-hostile script" do
       Dir.mktmpdir do |dir|

@@ -334,8 +334,13 @@ module Audition
 
       # -- subprocess plumbing -------------------------------------
 
+      # Harness output can carry arbitrary target bytes; force
+      # valid UTF-8 before any string work or a binary exception
+      # message crashes the whole run.
       def run(mode, payload = {})
         out, err, timed_out = execute(mode, payload)
+        out = sanitize(out)
+        err = sanitize(err)
         if timed_out
           return {"error" => {
             "class" => "AuditionTimeout",
@@ -346,28 +351,67 @@ module Audition
       rescue JSON::ParserError
         {"error" => {
           "class" => "HarnessFailure",
-          "message" => (err || "").split("\n").last(5).join("; ")
+          "message" => err.split("\n").last(5).join("; ")
         }}
       end
 
+      def sanitize(text)
+        (text || "").dup.force_encoding(Encoding::UTF_8).scrub
+      end
+
+      # The harness leads its own process group so a timeout kills
+      # every descendant, and the pipe readers are bounded: a
+      # child the target spawned inherits our pipes and would
+      # otherwise hold the read until it exits, defeating the
+      # timeout and leaving orphans behind.
       def execute(mode, payload)
         cmd = [@ruby, "-W0", HARNESS, mode]
-        Open3.popen3(*cmd) do |stdin, stdout, stderr, wait|
+        Open3.popen3(*cmd, pgroup: true) do |stdin, stdout, stderr, wait|
           stdin.write(JSON.generate(payload))
           stdin.close
-          out_reader = Thread.new { stdout.read }
-          err_reader = Thread.new { stderr.read }
-          if wait.join(@timeout)
-            [out_reader.value, err_reader.value, false]
-          else
-            begin
-              Process.kill("KILL", wait.pid)
-            rescue Errno::ESRCH
-              nil
+          out_reader = reader(stdout)
+          err_reader = reader(stderr)
+          timed_out = wait.join(@timeout).nil?
+          kill_group(wait.pid) if timed_out
+          unless drain(out_reader, err_reader)
+            kill_group(wait.pid)
+            unless drain(out_reader, err_reader)
+              close_quietly(stdout)
+              close_quietly(stderr)
             end
-            [out_reader.value.to_s, err_reader.value.to_s, true]
           end
+          [out_reader.value.to_s, err_reader.value.to_s, timed_out]
         end
+      end
+
+      # Accumulates chunks so a forced close still yields what
+      # arrived before it; a plain IO#read would lose everything.
+      def reader(io)
+        Thread.new do
+          buffer = String.new(encoding: Encoding::BINARY)
+          begin
+            loop { buffer << io.readpartial(65_536) }
+          rescue IOError
+            buffer
+          end
+          buffer
+        end
+      end
+
+      def drain(*threads)
+        threads.all? { |thread| thread.join(2) }
+      end
+
+      def kill_group(pid)
+        Process.kill("KILL", -pid)
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
+      end
+
+      def close_quietly(io)
+        io.close
+      rescue IOError
+        nil
       end
     end
   end
