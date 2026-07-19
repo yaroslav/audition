@@ -5,9 +5,10 @@ description: Use when asked whether Ruby code (a gem, script,
   inside Ractors, when making code Ractor-safe or
   Ractor-compatible on Ruby 4.0+, when adding a CI gate for
   Ractor readiness, or when errors mention
-  Ractor::IsolationError, can not access global variables from
-  non-main Ractor, non-shareable objects, or an un-shareable
-  Proc.
+  Ractor::IsolationError, Ractor::UnsafeError, can not access
+  global variables from non-main Ractor, ractor unsafe method
+  called from not main ractor, non-shareable objects, or an
+  un-shareable Proc.
 license: MIT
 ---
 
@@ -86,6 +87,34 @@ call the memoizing methods once at boot, before spawning
 Ractors; the end of the gem's main file or an on_load hook is
 the natural place.
 
+## Native extensions (C and Rust)
+
+audition reads Ruby only; it cannot see native code.
+Ractor::UnsafeError ("ractor unsafe method called from not
+main ractor") is not an IsolationError: it means a compiled
+extension never declared rb_ext_ractor_safe, so every method
+it defines raises on first call from a non-main Ractor. The
+library probe requires the gem and sweeps constants without
+calling methods, so a gem with unsafe native methods can
+still audit as ready. Script and Rack probes execute real
+code inside a Ractor, so they do surface it when the code
+path reaches the extension.
+
+Before trusting ready on a gem that ships compiled files
+(*.bundle on macOS, *.so on Linux), check the binary. An
+extension that declares safety calls rb_ext_ractor_safe, and
+that call is imported from libruby, so the symbol is visible
+without sources:
+
+    nm -u ext.bundle | grep rb_ext_ractor_safe    # macOS
+    nm -D -u ext.so | grep rb_ext_ractor_safe     # Linux
+
+A match means the extension declares Ractor safety; silence
+means its methods raise from Ractors. Check every compiled
+file the gem ships. For silent extensions: keep those calls
+on the main Ractor, try a newer release, or ask upstream to
+audit the C code and declare rb_ext_ractor_safe(true).
+
 ## What the fixer refuses (human work)
 
 Registries and accumulators (`@x ||= {}` then mutated),
@@ -109,3 +138,5 @@ https://github.com/yaroslav/audition/blob/main/docs/rails_core_best_practices.md
   blamed on the fixes.
 - Leaving accepted findings as prose instead of encoding them
   with pragmas, config, or the baseline.
+- Declaring a gem with compiled extensions ready without the
+  nm check: audition cannot see native code.
