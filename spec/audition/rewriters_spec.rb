@@ -103,6 +103,33 @@ RSpec.describe "unsafe rewriters" do
     end
   end
 
+  it "refuses magic comments when the file mutates its constants" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "params.rb", <<~RUBY)
+        PARAMS_CONFIG = {}
+
+        def self.record(value)
+          PARAMS_CONFIG[:key] = value
+        end
+      RUBY
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).not_to include("shareable_constant_value")
+      expect(content).to include("PARAMS_CONFIG = {}\n")
+
+      script = <<~RUBY
+        require #{path.inspect}
+        record(1)
+        raise "lost" unless PARAMS_CONFIG[:key] == 1
+        print "mutable-constant-intact"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("mutable-constant-intact"), err
+    end
+  end
+
   it "refuses shareable_constant_value for containers of locals" do
     Dir.mktmpdir do |dir|
       path = write(dir, "racc.rb", <<~RUBY)
@@ -155,7 +182,7 @@ RSpec.describe "unsafe rewriters" do
   it "keeps nil invalidation working for reset caches" do
     Dir.mktmpdir do |dir|
       path = write(dir, "store.rb", <<~RUBY)
-        class Store
+        module Store
           def self.pattern
             @pattern ||= compute
           end
@@ -294,6 +321,62 @@ RSpec.describe "unsafe rewriters" do
       )
       expect(content).to include('File.join(@root, "doc")')
       expect(all_findings(path).none?(&:error?)).to be(true)
+    end
+  end
+
+  it "skips constructor memos entirely" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        module Host
+          def self.filters = (@filters ||= Set.new)
+
+          def self.instance
+            @instance ||= new
+          end
+        end
+      RUBY
+      path = write(dir, "ctor.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+    end
+  end
+
+  it "keeps Ractor-local conversion off inheritable classes" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        class Middleware
+          def self.options
+            @options ||= defaults.merge(self::EXTRA)
+          end
+
+          def self.options=(value)
+            @options = value
+          end
+        end
+      RUBY
+      path = write(dir, "middleware.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+    end
+  end
+
+  it "never converts write-once variables holding constructions" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        class Show
+          @@eats_errors = Object.new
+          def sink = @@eats_errors
+        end
+      RUBY
+      path = write(dir, "eats.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
     end
   end
 

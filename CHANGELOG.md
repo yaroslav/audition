@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.0] - Unreleased
+
+- Battle-tested against mail, liquid, sinatra, faraday, and
+  money; suites pass at baseline parity after `--fix-unsafe`
+  except three liquid tests that mutate a converted registry
+  from another file (the documented cross-file blindness of the
+  unsafe tier). Five more fixer bugs fixed: bracketless
+  multi-value constants (`X = :a, :b`) gain brackets when
+  wrapped; constructor memos (`@x ||= Set.new`, `@instance ||=
+  new`) are never frozen or made Ractor-local; write-once
+  conversion skips constructed values that may gain singleton
+  methods (sinatra's `@@eats_errors`); Ractor-local conversion
+  is limited to module-owned state, since class ivars shard per
+  subclass (faraday's `DEFAULT_OPTIONS`); and constants the
+  defining file itself mutates (sinatra's `PARAMS_CONFIG`)
+  block both magic comments and inline wraps while keeping
+  their finding.
+
 ## [0.2.0] - 2026-07-19
 
 - Class-level memoization fixes recognize both idioms (`@x ||=`

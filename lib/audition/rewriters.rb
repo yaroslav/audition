@@ -30,7 +30,14 @@ module Audition
         classifier = Static::LiteralClassifier.new(
           frozen_string_literal: file.frozen_string_literal?
         )
-        values = constant_values(file)
+        collector = constant_collector(file)
+        # A constant assigned here and mutated here is a
+        # deliberate accumulator (sinatra's PARAMS_CONFIG);
+        # freezing the file's constants would raise at the
+        # mutation site.
+        return nil if mutates_own_constant?(file, collector.names)
+
+        values = collector.values
         kinds = values.map { |v| classifier.classify(v) }
         flagged = kinds.reject do |k|
           %i[shareable unknown].include?(k)
@@ -44,6 +51,16 @@ module Audition
         elsif !file.frozen_string_literal? &&
             flagged.all? { |k| k == :mutable_string }
           comment_plan(file, FSL_LINE)
+        end
+      end
+
+      def self.mutates_own_constant?(file, assigned)
+        mutated = file.mutated_constants
+        assigned.any? do |name|
+          bare = name.split("::").last
+          mutated.any? do |m|
+            m == name || m.split("::").last == bare
+          end
         end
       end
 
@@ -82,28 +99,39 @@ module Audition
         }
       end
 
-      def self.constant_values(file)
+      def self.constant_collector(file)
         collector = ConstantValues.new
         collector.visit(file.root)
-        collector.values
+        collector
       end
 
       class ConstantValues < Prism::Visitor
-        attr_reader :values
+        attr_reader :values, :names
 
         def initialize
           @values = []
+          @names = []
           super
         end
 
         %i[
           visit_constant_write_node
           visit_constant_or_write_node
+        ].each do |method|
+          define_method(method) do |node| # audition:disable unsafe-calls
+            @values << node.value
+            @names << node.name.to_s
+            super(node)
+          end
+        end
+
+        %i[
           visit_constant_path_write_node
           visit_constant_path_or_write_node
         ].each do |method|
           define_method(method) do |node| # audition:disable unsafe-calls
             @values << node.value
+            @names << node.target.location.slice
             super(node)
           end
         end
@@ -160,17 +188,43 @@ module Audition
           # algorithm registry). Freezing it breaks registration
           # and Ractor-local copies would leave other Ractors an
           # empty registry; the copy-on-write refactor is human
-          # work, so no edit is offered.
+          # work, so no edit is offered. Constructor memos (`new`,
+          # `Set.new`, `.dup`) are the same family: liquid's
+          # filter set and money's bank singleton both broke under
+          # freezing, and per-Ractor copies hide main-Ractor
+          # registrations.
           next if memos.any? { |m| accumulator?(m[:op][:node].value) }
+          next if memos.any? do |m|
+            constructor?(m[:op][:node].value, classifier(file))
+          end
 
           if freezable?(ops, memos)
             edits.concat(freeze_edits(file, memos))
           else
+            # Ractor-local slots are keyed by lexical owner; on a
+            # class the ivar is per-subclass (faraday's
+            # DEFAULT_OPTIONS), and one shared key would merge
+            # every subclass's state. Modules cannot be
+            # subclassed, so only module-owned state converts.
+            next if ops.any? { |op| op[:class_owner] }
+
             key = %(:"#{namespace}/#{name}")
             edits.concat(ractor_edits(file, ops, memos, key))
           end
         end
         edits
+      end
+
+      def self.classifier(file)
+        Static::LiteralClassifier.new(
+          frozen_string_literal: file.frozen_string_literal?
+        )
+      end
+
+      def self.constructor?(value, classifier)
+        value.is_a?(Prism::CallNode) &&
+          %i[new dup clone].include?(value.name) &&
+          classifier.classify(value) != :shareable
       end
 
       # A memo site is an ||= write, or a plain write paired with a
@@ -243,12 +297,10 @@ module Audition
       # while leaving the memoization intact. Guards, sibling
       # reads, and method shapes stay untouched.
       def self.freeze_edits(file, memos)
-        classifier = Static::LiteralClassifier.new(
-          frozen_string_literal: file.frozen_string_literal?
-        )
+        kinds = classifier(file)
         memos.filter_map do |memo|
           value = memo[:op][:node].value
-          freeze_value(value, classifier.classify(value))
+          freeze_value(value, kinds.classify(value))
         end
       end
 
@@ -428,14 +480,20 @@ module Audition
         end
 
         def visit_class_node(node)
-          @namespace.push(node.constant_path.location.slice)
+          @namespace.push(
+            {name: node.constant_path.location.slice,
+             kind: :class}
+          )
           super
         ensure
           @namespace.pop
         end
 
         def visit_module_node(node)
-          @namespace.push(node.constant_path.location.slice)
+          @namespace.push(
+            {name: node.constant_path.location.slice,
+             kind: :module}
+          )
           super
         ensure
           @namespace.pop
@@ -534,11 +592,13 @@ module Audition
             body = true
           end
 
-          key = [@namespace.join("::"), name.to_s]
+          names = @namespace.map { |entry| entry[:name] }
+          key = [names.join("::"), name.to_s]
           @groups[key] << {
             node: node, kind: kind, body: body,
             def_id: current_def && current_def[:id],
-            def_name: current_def && current_def[:name]
+            def_name: current_def && current_def[:name],
+            class_owner: @namespace.last[:kind] == :class
           }
         end
       end
@@ -591,6 +651,10 @@ module Audition
           write = writes[0][:node]
           kind = classifier.classify(write.value)
           next if kind == :sync_primitive
+          # A constructed object may gain singleton methods or be
+          # mutated later (sinatra's @@eats_errors); wrapping it
+          # in make_shareable freezes it and those break.
+          next if Memoization.constructor?(write.value, classifier)
 
           shareable = kind == :shareable
           # A mutable value that would get deep-frozen must never be
@@ -617,6 +681,10 @@ module Audition
           unless shareable
             value = write.value
             source = value.location.slice
+            if value.is_a?(Prism::ArrayNode) &&
+                value.opening_loc.nil?
+              source = "[#{source}]"
+            end
             edits << Autofix.new(
               start_offset: value.location.start_offset,
               end_offset: value.location.end_offset,

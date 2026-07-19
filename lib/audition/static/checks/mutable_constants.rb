@@ -117,17 +117,23 @@ module Audition
         def examine(name, node, value)
           return if file.shareable_constants?
 
+          # A constant this file itself mutates in place is a
+          # deliberate accumulator; freezing it would raise at
+          # the mutation site (sinatra's PARAMS_CONFIG). The
+          # finding stays, the autofix goes.
+          fix_ok = !mutated?(name)
           case classifier.classify(value)
           when :mutable_string
             flag(node, :mutable_string, name: name,
-              autofix: append_freeze(value))
+              autofix: fix_ok ? append_freeze(value) : nil)
           when :mutable_container
             flag(node, :mutable_container, name: name,
               type: container_type(value),
-              autofix: wrap_make_shareable(value))
+              autofix: fix_ok ? wrap_make_shareable(value) : nil)
           when :shallow_freeze
             flag(node, :shallow_freeze, name: name,
-              autofix: replace_with_make_shareable(value))
+              autofix:
+                fix_ok ? replace_with_make_shareable(value) : nil)
           when :sync_primitive
             klass = value.is_a?(Prism::CallNode) &&
               classifier.const_name(value.receiver)
@@ -135,9 +141,16 @@ module Audition
               klass: klass || "sync primitive")
           when :proc
             flag(node, :proc_constant, name: name,
-              autofix: wrap_make_shareable(value))
+              autofix: fix_ok ? wrap_make_shareable(value) : nil)
           when :default_proc
             flag(node, :hash_default_proc, name: name)
+          end
+        end
+
+        def mutated?(name)
+          bare = name.split("::").last
+          file.mutated_constants.any? do |mutated|
+            mutated == name || mutated.split("::").last == bare
           end
         end
 
@@ -147,7 +160,7 @@ module Audition
         # only: `RENDERERS << x` is a registry mutation, while
         # `User << x` is a class method call.
         MUTATORS = Ractor.make_shareable(
-          %i[[]= << push unshift concat merge! replace]
+          SourceFile::CONST_MUTATORS
         )
 
         def flag_constant_mutation(node)
@@ -202,8 +215,14 @@ module Audition
           end
         end
 
+        # `X = :a, :b` is an array literal without brackets; the
+        # slice must gain them or the wrap becomes a multi-arg
+        # call (mail's ATTRIBUTES).
         def wrap_make_shareable(value)
           source = value.location.slice
+          if value.is_a?(Prism::ArrayNode) && value.opening_loc.nil?
+            source = "[#{source}]"
+          end
           Autofix.new(
             start_offset: value.location.start_offset,
             end_offset: value.location.end_offset,

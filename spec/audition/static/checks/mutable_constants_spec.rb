@@ -58,6 +58,18 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     expect(findings).to be_empty
   end
 
+  it "brackets bare multi-value constants when wrapping" do
+    code = "ATTRS = :a, :b, :c\n"
+    finding = findings_for(code).first
+
+    fix = finding.autofix
+    fixed = code.dup
+    fixed[fix.start_offset...fix.end_offset] = fix.replacement
+    expect(fixed).to eq(
+      "ATTRS = Ractor.make_shareable([:a, :b, :c])\n"
+    )
+  end
+
   it "refuses make_shareable for containers of sync primitives" do
     findings = findings_for(<<~RUBY)
       MUTEXES = { adapter: Mutex.new }.freeze
@@ -90,6 +102,17 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
 
     expect(findings.size).to eq(2)
     expect(findings.first.message).to include("mutable")
+  end
+
+  it "withholds autofixes for constants the file mutates" do
+    findings = findings_for(<<~RUBY)
+      PARAMS = {}
+      def self.record(v) = PARAMS[:k] = v
+    RUBY
+
+    container = findings.find { |f| f.message.include?("mutable") }
+    expect(container.severity).to eq(:error)
+    expect(container.fixable?).to be(false)
   end
 
   it "flags in-place mutation of screaming-case constants" do

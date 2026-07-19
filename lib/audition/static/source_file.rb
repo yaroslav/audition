@@ -87,6 +87,38 @@ module Audition
         @raw ||= source.dup.force_encoding(Encoding::BINARY)
       end
 
+      # Method names that read as in-place data mutation when
+      # sent to a constant. Shared by the mutable-constants check
+      # and the fixers: a constant this file mutates is a
+      # deliberate accumulator (sinatra's PARAMS_CONFIG) and must
+      # never be frozen by magic comment or wrap.
+      CONST_MUTATORS = %i[
+        []= << push unshift concat merge! replace
+      ].freeze
+
+      # @return [Array<String>] names of constants that receive a
+      #   mutator call somewhere in this file
+      def mutated_constants
+        @mutated_constants ||= begin
+          names = []
+          queue = [root]
+          until queue.empty?
+            node = queue.shift
+            queue.concat(node.child_nodes.compact)
+            next unless node.is_a?(Prism::CallNode)
+            next unless CONST_MUTATORS.include?(node.name)
+
+            case node.receiver
+            when Prism::ConstantReadNode
+              names << node.receiver.name.to_s
+            when Prism::ConstantPathNode
+              names << node.receiver.location.slice
+            end
+          end
+          names.uniq
+        end
+      end
+
       # Keys Ruby actually honors. Prism reports every comment
       # shaped like `# key: value`, which sweeps up documentation
       # (`# I18n.t: 'date.formats.short'`); inserting after those
