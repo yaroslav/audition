@@ -324,6 +324,60 @@ RSpec.describe "unsafe rewriters" do
     end
   end
 
+  it "wraps config setters in best-effort make_shareable" do
+    Dir.mktmpdir do |dir|
+      path = write(dir, "config.rb", <<~RUBY)
+        module Config
+          def self.backend = @backend
+
+          def self.backend=(value)
+            @backend = value
+          end
+        end
+      RUBY
+
+      fix!(path)
+      fix!(path)
+
+      content = File.read(path)
+      expect(content.scan("make_shareable").size).to eq(1)
+      expect(content).to include(
+        "@backend = (Ractor.make_shareable(value) rescue value)"
+      )
+      expect(all_findings(path).none?(&:error?)).to be(true)
+
+      script = <<~RUBY
+        Warning[:experimental] = false
+        require #{path.inspect}
+        Config.backend = "file"
+        seen = Ractor.new { Config.backend }.value
+        raise "not shared" unless seen == "file"
+        Config.backend = proc { :cb }
+        raise "lost proc" unless Config.backend.call == :cb
+        print "best-effort-works"
+      RUBY
+      out, err, = Open3.capture3(RbConfig.ruby, "-e", script)
+      expect(out).to eq("best-effort-works"), err
+    end
+  end
+
+  it "leaves computed setter values alone" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        module Config
+          def self.mode=(value)
+            @mode = value.to_sym
+          end
+        end
+      RUBY
+      path = write(dir, "mode.rb", source)
+
+      fix!(path)
+
+      expect(File.read(path)).to eq(source)
+    end
+  end
+
   it "skips constructor memos entirely" do
     Dir.mktmpdir do |dir|
       source = <<~RUBY

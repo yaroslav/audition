@@ -180,7 +180,10 @@ module Audition
           next if ops.any? { |op| op[:body] }
 
           memos = memo_sites(ops)
-          next if memos.empty?
+          if memos.empty?
+            edits.concat(setter_edits(ops))
+            next
+          end
           next if orphan_guards?(ops, memos)
           next if guarded_with_strays?(ops, memos)
           # `@x ||= {}` is a lazily-built accumulator, mutated
@@ -247,6 +250,30 @@ module Audition
       def self.accumulator?(value)
         (value.is_a?(Prism::ArrayNode) ||
           value.is_a?(Prism::HashNode)) && value.elements.empty?
+      end
+
+      # Config setters (`def self.backend=(value); @backend =
+      # value; end`) get the Rails try_make_shareable recipe in
+      # plain Ruby: shareable values are deeply frozen so reads
+      # from any Ractor become legal, unshareable values keep
+      # today's behavior through the rescue. Only bare local reads
+      # are wrapped; computed values are left for a human.
+      def self.setter_edits(ops)
+        ops.filter_map do |op|
+          next unless op[:kind] == :write
+
+          value = op[:node].value
+          next unless value.is_a?(Prism::LocalVariableReadNode)
+
+          name = value.name
+          Autofix.new(
+            start_offset: value.location.start_offset,
+            end_offset: value.location.end_offset,
+            replacement:
+              "(Ractor.make_shareable(#{name}) rescue #{name})",
+            safety: :unsafe
+          )
+        end
       end
 
       def self.guarded_with_strays?(ops, memos)

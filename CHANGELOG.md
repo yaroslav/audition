@@ -2,6 +2,16 @@
 
 ## [0.2.1] - Unreleased
 
+- New unsafe rewrite for config setters: a singleton setter
+  assigning its bare parameter (`@backend = value`) becomes
+  `@backend = (Ractor.make_shareable(value) rescue value)`, the
+  Rails try_make_shareable recipe in plain Ruby. Shareable
+  values are deeply frozen so any Ractor may read them;
+  unshareable values keep their old behavior through the
+  rescue. The class-level-state check recognizes the pattern
+  and downgrades such state to a best-effort warning, with the
+  dynamic probe as ground truth.
+
 - Battle-tested against mail, liquid, sinatra, faraday, and
   money; suites pass at baseline parity after `--fix-unsafe`
   except three liquid tests that mutate a converted registry

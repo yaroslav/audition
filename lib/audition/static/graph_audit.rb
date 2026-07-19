@@ -48,6 +48,18 @@ module Audition
         "hook. If the value genuinely must be computed at " \
         "runtime, proxy the write to the main Ractor or use " \
         "Ractor.store_if_absent."
+      BEST_EFFORT_WHY =
+        "Writes wrap their value in Ractor.make_shareable with " \
+        "a rescue fallback: shareable values are deeply frozen " \
+        "and readable from any Ractor, while unshareable values " \
+        "keep their old (Ractor-hostile) behavior. Whether this " \
+        "state is actually safe depends on what the application " \
+        "assigns; the dynamic probe reports ground truth."
+      BEST_EFFORT_FIX =
+        "Assign only shareable values (strings, symbols, frozen " \
+        "containers) before spawning Ractors. Configuration " \
+        "that cannot be shareable needs per-Ractor state or a " \
+        "main-Ractor proxy instead."
 
       # @param sources [Hash{String => String}] path => source
       # @return [Array<Finding>]
@@ -111,9 +123,10 @@ module Audition
 
         variable = decl.name.split("#").last
         owner = display_owner(decl.owner)
-        frozen = @frozen_memos["#{owner}/#{variable}"] == :frozen
+        verdict = @frozen_memos["#{owner}/#{variable}"]
         each_local_definition(decl).map do |defn|
-          if frozen
+          case verdict
+          when :frozen
             finding_at(
               defn,
               check: "class-level-state",
@@ -122,6 +135,16 @@ module Audition
                        "#{owner}; warm it on the main Ractor",
               why: FROZEN_MEMO_WHY,
               fix: FROZEN_MEMO_FIX
+            )
+          when :best_effort
+            finding_at(
+              defn,
+              check: "class-level-state",
+              severity: :warning,
+              message: "best-effort frozen state #{variable} " \
+                       "on #{owner}",
+              why: BEST_EFFORT_WHY,
+              fix: BEST_EFFORT_FIX
             )
           else
             finding_at(
@@ -179,13 +202,64 @@ module Audition
           )
           collector.groups.each do |(namespace, name), ops|
             key = "#{namespace}/#{name}"
-            verdict =
-              group_frozen?(ops, classifier) ? :frozen : :dirty
-            map[key] =
-              (map[key] == :dirty) ? :dirty : verdict
+            verdict = group_verdict(ops, classifier)
+            map[key] = weaker_verdict(map[key], verdict)
           end
         end
         map
+      end
+
+      # Cross-file merge keeps the weakest promise: any dirty file
+      # taints the group, and best-effort beats fully frozen.
+      VERDICT_RANK = {dirty: 0, best_effort: 1, frozen: 2}.freeze
+
+      def weaker_verdict(existing, verdict)
+        return verdict unless existing
+
+        [existing, verdict].min_by { |v| VERDICT_RANK[v] }
+      end
+
+      def group_verdict(ops, classifier)
+        return :dirty if ops.any? { |op| op[:body] }
+        return :dirty if ops.any? { |op| op[:kind] == :other }
+
+        memos = Rewriters::Memoization.memo_sites(ops)
+        if memos.any?
+          return group_frozen?(ops, classifier) ? :frozen : :dirty
+        end
+
+        writes = ops.select { |op| op[:kind] == :write }
+        return :dirty if writes.empty?
+
+        all_safe = writes.all? do |w|
+          value = w[:node].value
+          best_effort_value?(value) ||
+            Rewriters::Memoization.frozen_call?(value) ||
+            classifier.classify(value) == :shareable
+        end
+        wrapped = writes.any? do |w|
+          best_effort_value?(w[:node].value)
+        end
+        (all_safe && wrapped) ? :best_effort : :dirty
+      end
+
+      # Matches the emitted setter recipe:
+      #   (Ractor.make_shareable(value) rescue value)
+      def best_effort_value?(node)
+        inner = node
+        if inner.is_a?(Prism::ParenthesesNode)
+          body = inner.body&.body
+          return false unless body && body.size == 1
+
+          inner = body[0]
+        end
+        return false unless inner.is_a?(Prism::RescueModifierNode)
+
+        call = inner.expression
+        call.is_a?(Prism::CallNode) &&
+          call.name == :make_shareable &&
+          call.receiver.is_a?(Prism::ConstantReadNode) &&
+          call.receiver.name == :Ractor
       end
 
       def group_frozen?(ops, classifier)

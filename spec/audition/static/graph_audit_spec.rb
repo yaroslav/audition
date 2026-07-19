@@ -73,6 +73,25 @@ RSpec.describe Audition::Static::GraphAudit do
     expect(note.fix).to include("boot")
   end
 
+  it "downgrades best-effort frozen setters to a warning" do
+    findings = findings_for(
+      "config.rb" => <<~RUBY
+        module Config
+          def self.backend = @backend
+
+          def self.backend=(value)
+            @backend = (Ractor.make_shareable(value) rescue value)
+          end
+        end
+      RUBY
+    )
+
+    expect(findings.size).to eq(1)
+    note = findings.first
+    expect(note.severity).to eq(:warning)
+    expect(note.message).to include("best-effort")
+  end
+
   it "keeps unfrozen memoization an error" do
     findings = findings_for(
       "cache.rb" => <<~RUBY
