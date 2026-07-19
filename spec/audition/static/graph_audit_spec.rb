@@ -92,6 +92,41 @@ RSpec.describe Audition::Static::GraphAudit do
     expect(note.message).to include("best-effort")
   end
 
+  it "keeps shallow-frozen container memoization an error" do
+    findings = findings_for(
+      "registry.rb" => <<~RUBY
+        module Registry
+          def self.handlers
+            @handlers ||= [Handler.new].freeze
+          end
+        end
+      RUBY
+    )
+
+    expect(findings.first.severity).to eq(:error)
+  end
+
+  it "marks groups dirty when a singleton reopening writes" do
+    findings = findings_for(
+      "a.rb" => <<~RUBY,
+        class Foo
+          def self.config
+            @config ||= "x".freeze
+          end
+        end
+      RUBY
+      "b.rb" => <<~RUBY
+        class << Foo
+          def bust!
+            @config = load_yaml
+          end
+        end
+      RUBY
+    )
+
+    expect(findings).to all(have_attributes(severity: :error))
+  end
+
   it "keeps unfrozen memoization an error" do
     findings = findings_for(
       "cache.rb" => <<~RUBY

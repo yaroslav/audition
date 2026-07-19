@@ -205,8 +205,57 @@ module Audition
             verdict = group_verdict(ops, classifier)
             map[key] = weaker_verdict(map[key], verdict)
           end
+          mark_singleton_reopenings(file, map)
         end
         map
+      end
+
+      # `class << Foo` bodies write ivars on Foo's singleton
+      # class outside the collector's `class << self` tracking;
+      # any such write taints the group so a reopening in one
+      # file can never be shadowed by a clean memo in another.
+      def mark_singleton_reopenings(file, map)
+        queue = [file.root]
+        until queue.empty?
+          node = queue.shift
+          queue.concat(node.child_nodes.compact)
+          next unless node.is_a?(Prism::SingletonClassNode)
+
+          owner =
+            case node.expression
+            when Prism::ConstantReadNode
+              node.expression.name.to_s
+            when Prism::ConstantPathNode
+              node.expression.location.slice
+            end
+          next unless owner
+
+          ivar_names_in(node).each do |ivar|
+            map["#{owner}/#{ivar}"] = :dirty
+          end
+        end
+      end
+
+      IVAR_NODES = [
+        Prism::InstanceVariableReadNode,
+        Prism::InstanceVariableWriteNode,
+        Prism::InstanceVariableOrWriteNode,
+        Prism::InstanceVariableOperatorWriteNode,
+        Prism::InstanceVariableAndWriteNode,
+        Prism::InstanceVariableTargetNode
+      ].freeze
+
+      def ivar_names_in(node)
+        names = []
+        queue = [node]
+        until queue.empty?
+          current = queue.shift
+          queue.concat(current.child_nodes.compact)
+          if IVAR_NODES.any? { |type| current.is_a?(type) }
+            names << current.name.to_s
+          end
+        end
+        names.uniq
       end
 
       # Cross-file merge keeps the weakest promise: any dirty file
@@ -277,14 +326,35 @@ module Audition
 
         memos.all? do |memo|
           value = memo[:op][:node].value
-          Rewriters::Memoization.frozen_call?(value) ||
-            classifier.classify(value) == :shareable
+          frozen_memo_value?(value, classifier)
+        end
+      end
+
+      # A bare `.freeze` on a container literal is shallow: the
+      # elements stay mutable and the cross-Ractor read still
+      # raises, so it must not count as frozen. A `.freeze` on a
+      # call result is accepted as the memo recipe (the dynamic
+      # probe verifies the value); provably shareable values pass.
+      def frozen_memo_value?(value, classifier)
+        return true if classifier.classify(value) == :shareable
+        return false unless Rewriters::Memoization.frozen_call?(value)
+
+        case value.receiver
+        when Prism::ArrayNode, Prism::HashNode,
+             Prism::KeywordHashNode
+          false
+        else
+          true
         end
       end
 
       # "Payments::<Payments>" reads as noise; show "Payments".
+      # Nested singleton owners produce nested angle brackets, so
+      # the strip repeats until the tail is gone.
       def display_owner(owner)
-        (owner&.name || "?").sub(/::<[^>]+>\z/, "")
+        name = owner&.name || "?"
+        name = name.sub(/::<.*>\z/m, "") while name.match?(/::<.*>\z/m)
+        name
       end
 
       def path_from_uri(uri)

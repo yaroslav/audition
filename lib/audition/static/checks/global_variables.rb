@@ -11,8 +11,9 @@ module Audition
       class GlobalVariables < Base
         SAFE_READS = %w[
           $stdin $stdout $stderr $! $? $~ $_ $DEBUG $VERBOSE $/ $$
+          $-v $-d
         ].freeze
-        SAFE_WRITES = %w[$DEBUG $VERBOSE].freeze
+        SAFE_WRITES = %w[$DEBUG $VERBOSE $-v $-d].freeze
         LOAD_PATH_GLOBALS = %w[$LOAD_PATH $: $LOADED_FEATURES $"].freeze
 
         explain :access,

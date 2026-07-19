@@ -39,12 +39,21 @@ module Audition
           # @return [String] kebab-case check identifier
           def check_name(value = nil)
             @check_name = -value if value # audition:disable class-level-state
-            @check_name || name.split("::").last
-              .gsub(/([a-z0-9])([A-Z])/, '\1-\2').downcase
+            @check_name || (name || "anonymous-check").split("::")
+              .last.gsub(/([a-z0-9])([A-Z])/, '\1-\2').downcase
           end
 
+          # Catalogs merge down the ancestry so a subclass of a
+          # concrete check inherits its handlers and messages
+          # instead of raising KeyError at visit time.
           def explanations
-            @explanations || EMPTY_CATALOG
+            own = @explanations || EMPTY_CATALOG
+            parent = superclass
+            if parent.respond_to?(:explanations)
+              parent.explanations.merge(own)
+            else
+              own
+            end
           end
 
           # Registers a message catalog entry. Strings may contain
@@ -67,7 +76,13 @@ module Audition
           end
 
           def handlers
-            @handlers || EMPTY_CATALOG
+            own = @handlers || EMPTY_CATALOG
+            parent = superclass
+            if parent.respond_to?(:handlers)
+              parent.handlers.merge(own)
+            else
+              own
+            end
           end
 
           # Methods born from define_method carry their block as a

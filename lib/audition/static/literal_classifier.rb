@@ -64,10 +64,14 @@ module Audition
         end
       end
 
+      # `::Mutex` and `Mutex` are the same constant for matching
+      # purposes; the leading colons are stripped.
       def const_name(node)
         case node
-        when Prism::ConstantReadNode then node.name.to_s
-        when Prism::ConstantPathNode then node.location.slice
+        when Prism::ConstantReadNode
+          node.name.to_s
+        when Prism::ConstantPathNode
+          node.location.slice.delete_prefix("::")
         end
       end
 

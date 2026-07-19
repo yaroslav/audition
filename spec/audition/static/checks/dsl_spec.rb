@@ -51,6 +51,15 @@ RSpec.describe Audition::Static::Checks::Base do
       .to raise_error(KeyError)
   end
 
+  it "lets subclasses inherit handlers and messages" do
+    sub = Class.new(Audition::Static::Checks::GlobalVariables)
+
+    findings = sub.call(file_for("$a = 1\n"))
+
+    expect(findings.size).to eq(1)
+    expect(findings.first.check).to eq("anonymous-check")
+  end
+
   it "supports third-party check registration" do
     Audition::Static::Checks.register(toy_check)
     expect(Audition::Static::Checks.all).to include(toy_check)

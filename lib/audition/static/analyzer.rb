@@ -46,7 +46,13 @@ module Audition
         end
 
         parallel_analyze(paths, workers)
-      rescue Ractor::Error
+      rescue Ractor::Error => e
+        # The silent fallback would otherwise mask a check that is
+        # itself Ractor-hostile; surface it under -w.
+        if $VERBOSE
+          warn "audition: parallel scan fell back to serial: " \
+               "#{e.class}: #{e.message}"
+        end
         paths.flat_map { |path| analyze_path(path) }
       end
 

@@ -104,7 +104,12 @@ module Audition
         end
 
         on :call_node do |node|
-          flag_constant_mutation(node)
+          flag_constant_mutation(node, node.receiver, node.name.to_s)
+        end
+
+        on :index_operator_write_node, :index_or_write_node,
+          :index_and_write_node, :index_target_node do |node|
+          flag_constant_mutation(node, node.receiver, "[]=")
         end
 
         on :constant_path_write_node,
@@ -140,8 +145,16 @@ module Audition
             flag(node, :sync_primitive, name: name,
               klass: klass || "sync primitive")
           when :proc
+            # make_shareable on a proc raises when the proc
+            # captures locals or its self is unshareable (any
+            # top-level lambda); only capture-free lambdas inside
+            # a class or module body get the wrap.
+            wrappable = fix_ok && namespaced?(node) &&
+              (value.body.nil? ||
+                RactorIsolation::CaptureScanner
+                  .scan(value.body).empty?)
             flag(node, :proc_constant, name: name,
-              autofix: fix_ok ? wrap_make_shareable(value) : nil)
+              autofix: wrappable ? wrap_make_shareable(value) : nil)
           when :default_proc
             flag(node, :hash_default_proc, name: name)
           end
@@ -154,6 +167,30 @@ module Audition
           end
         end
 
+        def namespaced?(node)
+          offset = node.location.start_offset
+          module_ranges.any? { |range| range.cover?(offset) }
+        end
+
+        def module_ranges
+          @module_ranges ||= begin
+            ranges = []
+            queue = [file.root]
+            until queue.empty?
+              current = queue.shift
+              queue.concat(current.child_nodes.compact)
+              case current
+              when Prism::ClassNode, Prism::ModuleNode,
+                   Prism::SingletonClassNode
+                location = current.location
+                ranges <<
+                  (location.start_offset..location.end_offset)
+              end
+            end
+            ranges
+          end
+        end
+
         # Mutators that read as data mutation, not as class-level
         # method names (delete/update/store would collide with
         # Active Record class methods). Screaming-case receivers
@@ -163,17 +200,18 @@ module Audition
           SourceFile::CONST_MUTATORS
         )
 
-        def flag_constant_mutation(node)
-          return unless MUTATORS.include?(node.name)
+        def flag_constant_mutation(node, receiver, method)
+          if node.is_a?(Prism::CallNode)
+            return unless MUTATORS.include?(node.name)
+          end
 
-          name = classifier.const_name(node.receiver)
+          name = classifier.const_name(receiver)
           return unless name
           return if name == "ENV"
           return unless name.split("::").last
             .match?(/\A[A-Z][A-Z0-9_]*\z/)
 
-          flag(node, :constant_mutation, name: name,
-            method: node.name.to_s)
+          flag(node, :constant_mutation, name: name, method: method)
         end
 
         def container_type(value)
@@ -226,7 +264,8 @@ module Audition
           Autofix.new(
             start_offset: value.location.start_offset,
             end_offset: value.location.end_offset,
-            replacement: "Ractor.make_shareable(#{source})"
+            replacement: "Ractor.make_shareable(#{source})",
+            safety: :unsafe
           )
         end
 
@@ -237,7 +276,8 @@ module Audition
           Autofix.new(
             start_offset: call.location.start_offset,
             end_offset: call.location.end_offset,
-            replacement: "Ractor.make_shareable(#{source})"
+            replacement: "Ractor.make_shareable(#{source})",
+            safety: :unsafe
           )
         end
       end

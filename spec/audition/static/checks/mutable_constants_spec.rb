@@ -70,6 +70,13 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     )
   end
 
+  it "recognizes top-level-qualified sync primitives" do
+    findings = findings_for("LOCK = ::Mutex.new\n")
+
+    expect(findings.size).to eq(1)
+    expect(findings.first.message).to include("sync primitive")
+  end
+
   it "refuses make_shareable for containers of sync primitives" do
     findings = findings_for(<<~RUBY)
       MUTEXES = { adapter: Mutex.new }.freeze
@@ -102,6 +109,48 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
 
     expect(findings.size).to eq(2)
     expect(findings.first.message).to include("mutable")
+  end
+
+  it "treats index writes as mutation" do
+    findings = findings_for(<<~RUBY)
+      COUNTS = Hash.new(0)
+      def self.bump(k) = COUNTS[k] += 1
+      CACHE = {}
+      def self.get(k) = CACHE[k] ||= compute(k)
+    RUBY
+
+    containers = findings.select { |f| f.message.include?("mutable") }
+    expect(containers.size).to eq(2)
+    expect(containers.none?(&:fixable?)).to be(true)
+    mutations = findings.select do |f|
+      f.message.include?("in-place")
+    end
+    expect(mutations.map(&:line)).to contain_exactly(2, 4)
+  end
+
+  it "gates proc wraps on capture-free lambdas in a namespace" do
+    findings = findings_for(<<~RUBY)
+      TOP = ->(x) { x.to_s }
+
+      module Formats
+        defaults = {}
+        CAPTURING = -> { defaults }
+        CLEAN = ->(msg) { msg.to_s }
+      end
+    RUBY
+
+    by_name = findings.to_h { |f| [f.message[/[A-Z]+/], f] }
+    expect(by_name["TOP"].autofix).to be_nil
+    expect(by_name["CAPTURING"].autofix).to be_nil
+    expect(by_name["CLEAN"].autofix).not_to be_nil
+    expect(by_name["CLEAN"].autofix.unsafe?).to be(true)
+  end
+
+  it "marks make_shareable wraps as unsafe tier" do
+    findings = findings_for("CACHE = { a: [] }\n")
+
+    fix = findings.first.autofix
+    expect(fix.unsafe?).to be(true)
   end
 
   it "withholds autofixes for constants the file mutates" do

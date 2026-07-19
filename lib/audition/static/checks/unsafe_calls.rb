@@ -160,7 +160,7 @@ module Audition
           when Prism::ConstantReadNode
             receiver.name.to_s == expected
           when Prism::ConstantPathNode
-            receiver.location.slice == expected
+            receiver.location.slice.delete_prefix("::") == expected
           else
             false
           end

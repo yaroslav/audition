@@ -82,7 +82,11 @@ module Audition
 
           # Method definitions open fresh scopes; nothing inside
           # them can capture the surrounding locals.
+          # A def opens a fresh scope, but its receiver
+          # expression (`def x.foo`) evaluates in the enclosing
+          # one and can capture an outer local.
           def visit_def_node(node)
+            visit(node.receiver) if node.receiver
           end
 
           %i[
