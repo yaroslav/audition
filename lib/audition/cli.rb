@@ -362,7 +362,7 @@ module Audition
       if options[:format] == :json
         emit_sweep_json(rows)
       else
-        emit_sweep_table(rows)
+        emit_sweep_table(rows, options)
       end
       threshold = SEVERITIES.fetch(options[:fail_on])
       (rows.any? { |r| row_failed?(r, threshold) }) ? 1 : 0
@@ -387,7 +387,19 @@ module Audition
       end
     end
 
-    def emit_sweep_table(rows)
+    # Cells arrive preformatted: coercion would render a version
+    # like "3.2" as 3.200. Color follows the CLI's own detection
+    # because the table gem reads the global $stdout and cannot
+    # see --plain. Autolayout only on ttys; pipes keep full width.
+    def table_opts(options)
+      tty = @stdout.respond_to?(:tty?) && @stdout.tty?
+      {
+        color: style(options).color?, coerce: false,
+        layout: tty, placeholder: "-"
+      }
+    end
+
+    def emit_sweep_table(rows, options)
       ready = rows.count { |r| r.verdict == :ready }
       table = rows.map do |r|
         {
@@ -401,7 +413,9 @@ module Audition
           "status" => r.status
         }
       end
-      @stdout.puts(TableTennis.new(table, layout: false).to_s)
+      @stdout.puts(TableTennis.new(
+        table, zebra: true, **table_opts(options)
+      ).to_s)
       @stdout.puts(
         "#{ready} of #{rows.size} gems ractor-ready"
       )
@@ -445,7 +459,9 @@ module Audition
         }
       end
       @stdout.puts("ruby #{RUBY_VERSION} at #{RbConfig.ruby}")
-      @stdout.puts(TableTennis.new(rows, layout: false).to_s)
+      @stdout.puts(
+        TableTennis.new(rows, **table_opts(options)).to_s
+      )
       0
     end
   end

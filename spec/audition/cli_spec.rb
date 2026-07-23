@@ -264,6 +264,110 @@ RSpec.describe Audition::CLI do
     end
   end
 
+  def stub_sweep(dir, rows)
+    lock = File.join(dir, "Gemfile.lock")
+    File.write(lock, <<~LOCK)
+      GEM
+        remote: https://rubygems.org/
+        specs:
+          warny (1.0.0)
+
+      PLATFORMS
+        ruby
+
+      DEPENDENCIES
+        warny
+    LOCK
+    sweeper = instance_double(Audition::BundleSweep)
+    allow(sweeper).to receive(:rows).and_return(rows)
+    allow(Audition::BundleSweep).to receive(:new)
+      .and_return(sweeper)
+    lock
+  end
+
+  def sweep_row(**overrides)
+    defaults = {
+      name: "warny", version: "1.0.0", verdict: :risky,
+      errors: 0, dep_errors: 0, warnings: 2, infos: 0,
+      fixable: 0, status: "ok"
+    }
+    Audition::BundleSweep::Row.new(**defaults.merge(overrides))
+  end
+
+  it "keeps preformatted version strings intact in the sweep" do
+    Dir.mktmpdir do |dir|
+      lock = stub_sweep(dir, [
+        sweep_row(name: "aa", version: "3.2"),
+        sweep_row(name: "bb", version: "0.1")
+      ])
+
+      _, out, = run(lock, "--static-only")
+
+      expect(out).to include("3.2")
+      expect(out).not_to include("3.200")
+    end
+  end
+
+  it "strips ANSI from the sweep table under --plain" do
+    Dir.mktmpdir do |dir|
+      lock = stub_sweep(dir, [sweep_row])
+      ENV["FORCE_COLOR"] = "1"
+
+      _, out, = run(lock, "--static-only", "--plain")
+
+      expect(out).to include("warny")
+      expect(out).not_to include("\e[")
+    ensure
+      ENV.delete("FORCE_COLOR")
+    end
+  end
+
+  it "fills empty sweep cells with a plain dash" do
+    Dir.mktmpdir do |dir|
+      lock = stub_sweep(dir, [sweep_row(version: nil)])
+
+      _, out, = run(lock, "--static-only")
+
+      expect(out).to include("warny")
+      expect(out).not_to include("—")
+    end
+  end
+
+  def tty_run(*argv)
+    stdout = Class.new(StringIO) do
+      def tty?
+        true
+      end
+    end.new
+    stderr = StringIO.new
+    status = described_class.run(argv, stdout: stdout,
+      stderr: stderr)
+    [status, stdout.string, stderr.string]
+  end
+
+  it "truncates overlong sweep cells on interactive terminals" do
+    Dir.mktmpdir do |dir|
+      lock = stub_sweep(
+        dir, [sweep_row(status: "boom " * 200)]
+      )
+
+      _, out, = tty_run(lock, "--static-only")
+
+      expect(out).to include("…")
+      expect(out).not_to include("boom " * 40)
+    end
+  end
+
+  it "zebra-stripes the sweep table on interactive terminals" do
+    Dir.mktmpdir do |dir|
+      lock = stub_sweep(dir, [sweep_row, sweep_row(name: "zz")])
+
+      _, out, = tty_run(lock, "--static-only")
+
+      expect(out).to match(/\e\[[0-9;]*48;2;/)
+    end
+  end
+
   it "reports finding deltas with --compare" do
     Dir.mktmpdir do |dir|
       path = File.join(dir, "app.rb")

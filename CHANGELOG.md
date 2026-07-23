@@ -2,6 +2,15 @@
 
 ## [0.2.1] - Unreleased
 
+- Terminal tables modernized on table_tennis 1.0 (now the
+  dependency floor). The sweep and capability tables follow the
+  CLI's own color detection, so `--plain` and `NO_COLOR` reach
+  them; cell coercion is off, so a version like "3.2" renders
+  verbatim instead of 3.200; empty cells show "-"; interactive
+  terminals get autolayout with ANSI-safe truncation while
+  pipes keep full-width grep-able output; and the sweep table
+  is zebra-striped for long dependency lists.
+
 - Adversarial hardening pass: four independent reviews of the
   fixer, checks, dynamic layer, and CLI produced 38 verified
   findings, all fixed with regression specs. Highlights: probe

@@ -34,6 +34,10 @@ module Audition
         @hyperlinks = hyperlinks
       end
 
+      def color?
+        @color
+      end
+
       def glyph(kind)
         GLYPHS.fetch(kind)[@color ? 0 : 1]
       end
