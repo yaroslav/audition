@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.1] - Unreleased
+## [0.2.1] - 2026-07-23
 
 - Terminal tables modernized on table_tennis 1.0 (now the
   dependency floor). The sweep and capability tables follow the
