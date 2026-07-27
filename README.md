@@ -116,6 +116,7 @@ proxying) and its verified semantics.
 - [Agent skill](#agent-skill)
 - [Extending](#extending)
 - [Development](#development)
+- [Acknowledgements](#acknowledgements)
 - [License](#license)
 
 ## Installation
@@ -311,6 +312,19 @@ passes `audition lib` clean.
 The design notes in `docs/design.md` include the empirically
 verified Ruby 4.0 Ractor semantics table that the checks are
 calibrated against.
+
+## Acknowledgements
+
+The whole-program checks stand on
+[rubydex](https://github.com/Shopify/rubydex), Shopify's
+high-performance static analysis suite for Ruby: audition feeds
+every file into its graph and reads state ownership back out.
+Thanks to its authors, in particular the top five contributors:
+[Alexandre Terrasa](https://github.com/Morriar),
+[Vinicius Stock](https://github.com/vinistock),
+[Alex Rocha](https://github.com/alexcrocha),
+[Stan Lo](https://github.com/st0012), and
+[Soutaro Matsumoto](https://github.com/soutaro).
 
 ## Assisted by
 
