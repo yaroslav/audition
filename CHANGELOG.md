@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.2] - Unreleased
+## [0.2.2] - 2026-07-27
 
 - The Ractor-parallel scan no longer collapses into a serial
   rerun, spraying Ractor backtraces on stderr first, whenever a
