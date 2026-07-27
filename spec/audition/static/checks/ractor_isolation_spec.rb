@@ -76,4 +76,24 @@ RSpec.describe Audition::Static::Checks::RactorIsolation do
 
     expect(findings).to be_empty
   end
+
+  # The parallel scan runs every check inside worker Ractors; the
+  # capture scanner must stay callable there or the whole scan
+  # falls back to serial.
+  it "dispatches from a non-main Ractor, as the parallel scan" do
+    source = <<~RUBY
+      z = [1]
+      Ractor.new { z.take(1) }
+    RUBY
+    Warning[:experimental] = false
+    messages = Ractor.new(source) do |code|
+      Audition::Static::Analyzer
+        .new(checks: [Audition::Static::Checks::RactorIsolation])
+        .analyze_source(code, path: "test.rb")
+        .map(&:message)
+    end.value
+
+    expect(messages.size).to eq(1)
+    expect(messages.first).to include("z")
+  end
 end

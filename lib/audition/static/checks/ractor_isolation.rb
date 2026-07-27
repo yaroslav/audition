@@ -89,18 +89,44 @@ module Audition
             visit(node.receiver) if node.receiver
           end
 
-          %i[
-            visit_local_variable_read_node
-            visit_local_variable_write_node
-            visit_local_variable_operator_write_node
-            visit_local_variable_or_write_node
-            visit_local_variable_and_write_node
-            visit_local_variable_target_node
-          ].each do |method|
-            define_method(method) do |node| # audition:disable unsafe-calls
-              @names << node.name.to_s if node.depth > @level
-              super(node)
-            end
+          # Plain defs, not a define_method loop: the parallel
+          # scan calls these from worker Ractors, and a method
+          # born from define_method carries an un-shareable Proc
+          # that raises when dispatched from another Ractor.
+          def visit_local_variable_read_node(node)
+            note(node)
+            super
+          end
+
+          def visit_local_variable_write_node(node)
+            note(node)
+            super
+          end
+
+          def visit_local_variable_operator_write_node(node)
+            note(node)
+            super
+          end
+
+          def visit_local_variable_or_write_node(node)
+            note(node)
+            super
+          end
+
+          def visit_local_variable_and_write_node(node)
+            note(node)
+            super
+          end
+
+          def visit_local_variable_target_node(node)
+            note(node)
+            super
+          end
+
+          private
+
+          def note(node)
+            @names << node.name.to_s if node.depth > @level
           end
         end
       end

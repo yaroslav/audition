@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.2] - Unreleased
+
+- The Ractor-parallel scan no longer collapses into a serial
+  rerun, spraying Ractor backtraces on stderr first, whenever a
+  scanned file sends the capture scanner after local variables.
+  Its visit methods were generated with define_method, the exact
+  un-shareable-Proc pattern audition's own unsafe-calls check
+  flags (and a pragma silenced), so the first dispatch from a
+  worker Ractor raised. They are plain defs now, and the check
+  is covered by an in-Ractor regression spec. Found while
+  verifying rubydex 0.3.0, which audition now runs on: findings
+  are byte-identical to 0.2.9 on real gems and no API we consume
+  changed, so the dependency floor stays at 0.2.
+
 ## [0.2.1] - 2026-07-23
 
 - Terminal tables modernized on table_tennis 1.0 (now the
