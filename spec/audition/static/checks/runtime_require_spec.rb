@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "tmpdir"
+
 RSpec.describe Audition::Static::Checks::RuntimeRequire do
   def findings_for(code)
     analyzer =
