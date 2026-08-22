@@ -20,19 +20,36 @@ module Audition
                "Ractor, and use port.send/port.receive; " \
                "collect results with Ractor#value."
 
-        explain :rails_class_state_macro,
+        explain :rails_class_variable_macro,
           severity: :error,
-          message: "%{method} stores state on the class " \
-                   "object",
-          why: "These ActiveSupport macros are backed by " \
-               "class-level instance variables or class " \
-               "variables; both raise Ractor::IsolationError " \
-               "when written (and class variables even when " \
-               "read) from a non-main Ractor.",
-          fix: "Compute the value at boot and store it in a " \
-               "deeply frozen constant, or keep per-Ractor " \
-               "state via Ractor.current[:key] / " \
-               "Ractor.store_if_absent."
+          message: "%{method} stores state in a class variable",
+          why: "The cattr_* and mattr_* macros define @@ class " \
+               "variables; reads and writes alike raise " \
+               "Ractor::IsolationError from a non-main Ractor, " \
+               "whatever the value holds.",
+          fix: "Rails itself migrated these to class_attribute " \
+               "(a class-level ivar whose frozen value any " \
+               "Ractor may read) or to a module ivar behind a " \
+               "reader; give it a frozen default and rebuild " \
+               "and refreeze on write, at boot on the main " \
+               "Ractor."
+
+        explain :rails_class_attribute,
+          severity: :warning,
+          message: "%{method} stores state on the class object",
+          why: "The value lives in a class-level instance " \
+               "variable. Rails 8.2 made the reader Ractor-safe, " \
+               "so a frozen value is readable from any Ractor; " \
+               "earlier readers are define_method closures that " \
+               "raise on the first call from a non-main Ractor " \
+               "(thread_mattr_accessor memoized its key the " \
+               "same way). Writes always need the main Ractor.",
+          fix: "Give it a frozen default (default: [].freeze) " \
+               "and write copy-on-write: self.x = (x | [v])" \
+               ".freeze, the idiom Rails applied across Action " \
+               "Pack and Active Record; do every write at boot " \
+               "on the main Ractor. The dynamic probe reports " \
+               "ground truth for the installed Rails."
 
         explain :objectspace_id2ref,
           severity: :warning,
@@ -91,13 +108,15 @@ module Audition
                "Ractor raises Ractor::IsolationError " \
                "(\"defined with an un-shareable Proc\") " \
                "unless the block was made shareable first.",
-          fix: "Generate the method with class_eval and a " \
-               "source string (how Rails fixed its autosave " \
-               "callbacks), or pass an isolated block: " \
-               "define_method(:x, " \
-               "&Ractor.make_shareable(proc { ... })). " \
-               "Isolated blocks cannot capture outer locals " \
-               "or use super."
+          fix: "Pass a shareable lambda instead of a block: " \
+               "define_method(:x, Ractor.shareable_lambda " \
+               "{ ... }), as Rails did for its date selectors " \
+               "and url helpers. Captured locals must be " \
+               "shareable (strings become symbols) and assigned " \
+               "before the lambda is created, and super is " \
+               "unavailable. When the captures are literals, " \
+               "generate the method with class_eval and a " \
+               "source string instead."
 
         explain :singleton_include,
           severity: :warning,
@@ -115,10 +134,11 @@ module Audition
         RULES = Ractor.make_shareable([
           {key: :ractor_yield_removed, receiver: "Ractor",
            methods: %i[yield take]},
-          {key: :rails_class_state_macro, receiver: nil,
-           methods: %i[class_attribute cattr_accessor cattr_reader
-             cattr_writer mattr_accessor mattr_reader
-             mattr_writer thread_mattr_accessor]},
+          {key: :rails_class_variable_macro, receiver: nil,
+           methods: %i[cattr_accessor cattr_reader cattr_writer
+             mattr_accessor mattr_reader mattr_writer]},
+          {key: :rails_class_attribute, receiver: nil,
+           methods: %i[class_attribute thread_mattr_accessor]},
           {key: :objectspace_id2ref, receiver: "ObjectSpace",
            methods: %i[_id2ref]},
           {key: :at_exit, receiver: nil, methods: %i[at_exit]},

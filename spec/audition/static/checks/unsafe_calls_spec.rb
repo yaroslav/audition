@@ -15,18 +15,32 @@ RSpec.describe Audition::Static::Checks::UnsafeCalls do
     expect(findings.first.fix).to include("Ractor::Port")
   end
 
-  it "flags Rails class-level attribute macros" do
+  it "flags class-variable macros with the class_attribute migration" do
+    findings = findings_for(<<~RUBY)
+      class Config
+        cattr_accessor :cache
+        mattr_reader :backend
+      end
+    RUBY
+
+    expect(findings.size).to eq(2)
+    expect(findings).to all(have_attributes(severity: :error))
+    expect(findings.first.why).to include("class variable")
+    expect(findings.first.fix).to include("class_attribute")
+  end
+
+  it "downgrades class_attribute to a copy-on-write warning" do
     findings = findings_for(<<~RUBY)
       class Config
         class_attribute :settings
-        cattr_accessor :cache
         thread_mattr_accessor :context
       end
     RUBY
 
-    expect(findings.size).to eq(3)
-    expect(findings).to all(have_attributes(severity: :error))
-    expect(findings.first.why).to include("class-level")
+    expect(findings.size).to eq(2)
+    expect(findings).to all(have_attributes(severity: :warning))
+    expect(findings.first.why).to include("Rails 8.2")
+    expect(findings.first.fix).to include("copy-on-write")
   end
 
   it "flags include Singleton" do
@@ -78,6 +92,7 @@ RSpec.describe Audition::Static::Checks::UnsafeCalls do
     expect(findings).to all(have_attributes(severity: :warning))
     expect(findings.first.why).to include("un-shareable Proc")
     expect(findings.first.fix).to include("class_eval")
+    expect(findings.first.fix).to include("Ractor.shareable_lambda")
   end
 
   it "leaves define_method with a shareable block pass-through alone" do

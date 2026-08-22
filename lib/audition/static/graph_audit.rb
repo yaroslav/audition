@@ -27,14 +27,18 @@ module Audition
         "it while it holds a non-shareable value (verified on " \
         "Ruby 4.0)."
       STATE_FIX =
-        "Precompute and freeze the value at load time (for " \
-        "per-subclass values, in the inherited hook). For " \
+        "Precompute and freeze the value at load time: a memo " \
+        "that needs no configuration becomes a frozen private " \
+        "constant (EMPTY = new(nil, nil).freeze), a cheap " \
+        "derivation drops its memo altogether, and " \
+        "per-subclass values compute in the inherited hook " \
+        "(guard on subclass.name for anonymous classes). For " \
         "collections, rebuild and refreeze on write, " \
         "Rails-style copy-on-write: self.list = " \
         "(list + [item]).freeze; never mutate in place. As a " \
-        "last resort use Ractor.store_if_absent for lazy " \
-        "initialization or per-Ractor state in " \
-        "Ractor.current[:key]."
+        "last resort use Ractor.store_if_absent for " \
+        "per-Ractor state, or read the ivar first and proxy " \
+        "the write to the main Ractor."
       FROZEN_MEMO_WHY =
         "Every write memoizes a shareable (frozen) value, so " \
         "non-main Ractors can read it once it has been " \
@@ -44,10 +48,13 @@ module Audition
         "memoized class state."
       FROZEN_MEMO_FIX =
         "Warm the cache at boot, before spawning Ractors: call " \
-        "the memoizing method from an initializer or on_load " \
-        "hook. If the value genuinely must be computed at " \
-        "runtime, proxy the write to the main Ractor or use " \
-        "Ractor.store_if_absent."
+        "the memoizing method from an initializer, an on_load " \
+        "hook, an eager_load! override, or the inherited hook. " \
+        "A value that can be nil or false never sticks under " \
+        "||=, so guard it with defined? instead. If the value " \
+        "genuinely must be computed at runtime, read the ivar " \
+        "first and proxy only the write to the main Ractor, or " \
+        "use Ractor.store_if_absent."
       BEST_EFFORT_WHY =
         "Writes wrap their value in Ractor.make_shareable with " \
         "a rescue fallback: shareable values are deeply frozen " \

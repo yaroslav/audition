@@ -8,6 +8,8 @@ module Audition
     #   :shareable         proven deeply shareable
     #   :mutable_string    unfrozen String literal
     #   :mutable_container Array/Hash literal or constructor
+    #   :mutable_call      unfrozen String or Regexp returned by
+    #                      a call (`.tr`, `format`, `Regexp.new`)
     #   :shallow_freeze    frozen container with mutable elements
     #   :sync_primitive    Mutex/Queue/... constructor
     #   :proc              lambda or proc
@@ -21,6 +23,24 @@ module Audition
         Thread::ConditionVariable
       ].freeze
       SHAREABLE_FACTORIES = %w[Struct Class Module].freeze
+
+      # Calls returning a fresh, unfrozen String or Regexp;
+      # `# frozen_string_literal: true` covers literals only.
+      # Rails hit both shapes (`.tr` and `Regexp.new`) in
+      # constants during its ractorization. These names belong
+      # to String alone in core, so any receiver qualifies.
+      STRING_ONLY_METHODS = %i[
+        tr tr_s gsub sub squeeze strip lstrip rstrip chomp chop
+        center ljust rjust encode scrub unicode_normalize
+      ].freeze
+      # Unambiguous only on a String literal receiver: Symbols
+      # and numbers define these too and return shareable values.
+      STRING_LITERAL_METHODS = %i[
+        + * % upcase downcase capitalize swapcase reverse dup
+        succ next
+      ].freeze
+      FORMATTERS = %i[format sprintf].freeze
+      REGEXP_FACTORIES = %i[new union compile].freeze
 
       # @param frozen_string_literal [Boolean] whether the file has
       #   the frozen_string_literal magic comment
@@ -92,6 +112,9 @@ module Audition
       end
 
       def classify_call(node)
+        return :mutable_call if fresh_string?(node) ||
+          fresh_regexp?(node)
+
         receiver = node.receiver
         case node.name
         when :freeze
@@ -130,11 +153,40 @@ module Audition
         when Prism::ArrayNode, Prism::HashNode
           deep_classify(receiver.elements)
         when Prism::CallNode
-          # A default proc survives freezing the Hash.
-          (classify(receiver) == :default_proc) ? :default_proc : :unknown
+          # A default proc survives freezing the Hash; a frozen
+          # String or Regexp from a call is deeply shareable.
+          case classify(receiver)
+          when :default_proc then :default_proc
+          when :mutable_call then :shareable
+          else :unknown
+          end
         else
           :unknown
         end
+      end
+
+      def fresh_string?(node)
+        receiver = node.receiver
+        name = node.name
+        case receiver
+        when nil
+          FORMATTERS.include?(name)
+        when Prism::StringNode, Prism::InterpolatedStringNode
+          STRING_ONLY_METHODS.include?(name) ||
+            STRING_LITERAL_METHODS.include?(name)
+        when Prism::ConstantReadNode, Prism::ConstantPathNode
+          owner = const_name(receiver)
+          (name == :new && owner == "String") ||
+            (owner == "Kernel" && FORMATTERS.include?(name)) ||
+            STRING_ONLY_METHODS.include?(name)
+        else
+          false
+        end
+      end
+
+      def fresh_regexp?(node)
+        REGEXP_FACTORIES.include?(node.name) &&
+          const_name(node.receiver) == "Regexp"
       end
 
       # A container holding a sync primitive can never become

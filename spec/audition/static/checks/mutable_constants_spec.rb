@@ -301,4 +301,58 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
       expect(findings_for("LOCK = Mutex.new").first).not_to be_fixable
     end
   end
+
+  it "flags constants built from calls that return fresh strings" do
+    findings = findings_for(<<~RUBY)
+      # frozen_string_literal: true
+      WITH_COLON = "+00:00"
+      WITHOUT_COLON = WITH_COLON.tr(":", "")
+      UPPER = "abc".upcase
+      JOINED = "a" + "b"
+      LABEL = format("%d items", 3)
+      RAW = String.new("x")
+    RUBY
+
+    expect(findings.map(&:line)).to eq([3, 4, 5, 6, 7])
+    expect(findings).to all(have_attributes(severity: :error))
+    expect(findings).to all(be_fixable)
+    expect(findings.first.message).to include("String")
+    expect(findings.first.fix).to include(".freeze")
+    expect(findings.first.why).to include("frozen_string_literal")
+  end
+
+  it "flags constants holding Regexps built at load time" do
+    findings = findings_for(<<~RUBY)
+      TAG = Regexp.new("x")
+      ANY = Regexp.union("a", "b")
+      SAFE = Regexp.new("x").freeze
+      LITERAL = /x/
+    RUBY
+
+    expect(findings.map(&:line)).to eq([1, 2])
+    expect(findings.first.message).to include("Regexp")
+    expect(findings.first.message).to include("Regexp.new")
+  end
+
+  it "accepts frozen call results" do
+    findings = findings_for(<<~RUBY)
+      # frozen_string_literal: true
+      A = "+00:00".tr(":", "").freeze
+      B = format("%d", 1).freeze
+      C = Regexp.union("a", "b").freeze
+    RUBY
+
+    expect(findings).to be_empty
+  end
+
+  it "leaves ambiguous calls on non-literal receivers alone" do
+    findings = findings_for(<<~RUBY)
+      # frozen_string_literal: true
+      SUM = Totals.sum + 1
+      NAME = Label.upcase
+      PATH = Settings.dup
+    RUBY
+
+    expect(findings).to be_empty
+  end
 end

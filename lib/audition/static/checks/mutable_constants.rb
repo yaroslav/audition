@@ -22,6 +22,19 @@ module Audition
           fix: "Add `# frozen_string_literal: true` to the " \
                "file, or append `.freeze`."
 
+        explain :mutable_call,
+          severity: :error,
+          message: "constant %{name} holds an unfrozen %{type} " \
+                   "returned by %{method}",
+          why: "`# frozen_string_literal: true` freezes " \
+               "literals only; a method call returns a fresh " \
+               "unfrozen object, so a non-main Ractor reading " \
+               "this constant raises Ractor::IsolationError. " \
+               "Rails hit this with `.tr` and `Regexp.new` " \
+               "during its ractorization.",
+          fix: "Append `.freeze` to the call; a frozen String " \
+               "or Regexp is deeply shareable."
+
         explain :mutable_container,
           severity: :error,
           message: "constant %{name} holds a mutable %{type} " \
@@ -56,8 +69,10 @@ module Audition
                "touching this constant raises " \
                "Ractor::IsolationError.",
           fix: "Use Ractor::Port for cross-Ractor " \
-               "coordination, keep a per-Ractor primitive " \
-               "via Ractor.store_if_absent, or use " \
+               "coordination; keep a per-Ractor primitive " \
+               "via Ractor.store_if_absent when the state it " \
+               "guards is per-Ractor too (Rails moved its " \
+               "template digest mutex this way); or use " \
                "Ractor-safe structures (ractor_safe, ratomic " \
                "gems)."
 
@@ -97,7 +112,12 @@ module Audition
                "freeze it (each_with_object then .freeze), " \
                "or move the registry behind a writer that " \
                "rebuilds and refreezes on each change, the " \
-               "copy-on-write style Rails registries use."
+               "copy-on-write style Rails registries use. A " \
+               "registry that plugins extend during boot is " \
+               "frozen in the last boot hook (after_initialize) " \
+               "rather than at definition, and writes after the " \
+               "freeze merge into a fresh frozen copy with a " \
+               "deprecation instead of raising."
 
         on :constant_write_node, :constant_or_write_node do |node|
           examine(node.name.to_s, node, node.value)
@@ -130,6 +150,10 @@ module Audition
           case classifier.classify(value)
           when :mutable_string
             flag(node, :mutable_string, name: name,
+              autofix: fix_ok ? append_freeze(value) : nil)
+          when :mutable_call
+            flag(node, :mutable_call, name: name,
+              type: call_type(value), method: call_display(value),
               autofix: fix_ok ? append_freeze(value) : nil)
           when :mutable_container
             flag(node, :mutable_container, name: name,
@@ -245,10 +269,36 @@ module Audition
 
         # Ternaries classify as strings when both branches are;
         # `.freeze` binds tighter than `?:`, so they get parens.
+        def call_type(call)
+          owner = classifier.const_name(call.receiver)
+          (owner == "Regexp") ? "Regexp" : "String"
+        end
+
+        def call_display(call)
+          return call.name.to_s if call.receiver.nil?
+
+          owner = classifier.const_name(call.receiver)
+          owner ? "#{owner}.#{call.name}" : "String##{call.name}"
+        end
+
+        # `.freeze` binds tighter than an operator: `"a" + "b".freeze`
+        # freezes only "b", so operator calls get parentheses while
+        # literals and parenthesized or argument-free calls take
+        # the bare suffix.
+        def bare_freezable?(value)
+          case value
+          when Prism::StringNode, Prism::InterpolatedStringNode
+            true
+          when Prism::CallNode
+            !value.opening_loc.nil? ||
+              (!value.receiver.nil? && value.arguments.nil?)
+          else
+            false
+          end
+        end
+
         def append_freeze(value)
-          string = value.is_a?(Prism::StringNode) ||
-            value.is_a?(Prism::InterpolatedStringNode)
-          if string
+          if bare_freezable?(value)
             offset = value.location.end_offset
             Autofix.new(
               start_offset: offset,
