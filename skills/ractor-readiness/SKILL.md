@@ -121,7 +121,10 @@ Registries and accumulators (`@x ||= {}` then mutated),
 constructor singletons (`@instance ||= new`), computed config
 setters, settings DSLs (sinatra-style), sync primitives,
 cross-file-mutated tables. These need the copy-on-write
-redesign Rails core used; recipes with real commits:
+redesign Rails core used; recipes with real commits, including
+the frozen private constant for configuration-free memos,
+freezing value objects at the end of initialize, and the
+snapshot-and-rehydrate protocol for lock-bearing singletons:
 https://github.com/yaroslav/audition/blob/main/docs/rails_core_best_practices.md
 
 ## Common mistakes

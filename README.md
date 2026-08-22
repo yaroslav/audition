@@ -213,10 +213,12 @@ Static, with file:line precision:
   body, `def self.`, and `class << self`, across files; the classic
   `@cache ||= {}` and `return @x if defined?(@x)` memoizations.
 - **Constants that are not deeply shareable**: bare mutable
-  literals, interpolated strings, and the subtle shallow freeze
-  (`[[1], [2]].freeze` still raises; audition explains why).
-  Honors `# frozen_string_literal:` and
-  `# shareable_constant_value:` magic comments.
+  literals, interpolated strings, the subtle shallow freeze
+  (`[[1], [2]].freeze` still raises; audition explains why), and
+  call results the magic comment never covers (`X.tr(":", "")`,
+  `Regexp.new`, `Regexp.union`, `format`), the shapes Rails fixed
+  last in its own ractorization. Honors `# frozen_string_literal:`
+  and `# shareable_constant_value:` magic comments.
 - **Sync primitives and Procs in constants** (Mutex, Queue,
   lambdas), including `Hash.new { }` default procs, which stay
   unshareable even after `.freeze`.
@@ -229,7 +231,9 @@ Static, with file:line precision:
 - **`Ractor.new` blocks capturing outer locals** (the ArgumentError
   at creation time), resolved through Prism's exact scope depths.
 - **Hostile or removed APIs**: `Ractor.yield`/`take` (gone in 4.0),
-  ActiveSupport `class_attribute`/`cattr_*`/`mattr_*`,
+  ActiveSupport `cattr_*`/`mattr_*` class variables (with the
+  `class_attribute` migration Rails itself made) and
+  `class_attribute` without copy-on-write writes,
   `include Singleton`, `fork`, `ObjectSpace._id2ref`, ENV mutation.
 
 Dynamic, on the live object graph:

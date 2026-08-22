@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.2.3] - Unreleased
+
+- Fix knowledge base refreshed from the latest fixes on Rails
+  main: the 61 ractorization commits that landed after the first
+  study (through 2026-08-20) were read in full and distilled into
+  seven new patterns in docs/rails_core_best_practices.md, with
+  every claim that touches audition's behavior verified on Ruby
+  4.0.6. The check advice, autofix recipes, README, and agent
+  skill below follow from that refresh.
+- New mutable-constants finding, with a safe `.freeze` autofix,
+  for constants holding a call result that the
+  `frozen_string_literal` magic comment never covers: String-only
+  methods on any receiver (`X.tr(":", "")`), String methods on
+  literals (`"a" + "b"`), `format`, `String.new`, and
+  `Regexp.new`/`union`/`compile`. Operator calls are
+  parenthesized before the suffix. Validated on Rails 8.1.3,
+  where it flags exactly the two sites Rails fixed in August
+  2026 plus `Regexp.union` constants in four gems, with no false
+  positives.
+- The Rails macro rule is split: `cattr_*`/`mattr_*` stay errors
+  (class variables, unreadable from any Ractor) and now point at
+  the `class_attribute` migration Rails made itself;
+  `class_attribute` and `thread_mattr_accessor` downgrade to a
+  warning, because Rails 8.2 made their readers Ractor-safe, with
+  the frozen-default plus copy-on-write recipe as the fix.
+- The `define_method` advice now leads with
+  `define_method(:x, Ractor.shareable_lambda { ... })`, the form
+  Rails settled on, and spells out its capture rules.
+- Class-level state advice refreshed: frozen private constants
+  for configuration-free memos, dropping cheap memos, `defined?`
+  guards for values that can be nil or false, `eager_load!` and
+  `inherited` warmers, boot-hook freezing for plugin-extended
+  registries, and per-Ractor mutexes only for per-Ractor state.
+
 ## [0.2.2] - 2026-07-27
 
 - The Ractor-parallel scan no longer collapses into a serial

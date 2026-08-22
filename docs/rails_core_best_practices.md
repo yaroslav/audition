@@ -248,3 +248,238 @@ Ideas this study suggests:
   instead of raw `Ractor.*`.
 - Recognize custom `#freeze` overrides that warm lazy state as a
   legitimate pattern rather than flagging the lazy ivar inside.
+
+## Second pass: 61 more commits, to 2026-08-20
+
+Refreshed on 2026-08-22 against rails/rails `main` at 2a2db1e8d6
+with the same selection over `cba6112015..origin/main`: 52
+commits by message, 48 by pickaxe, 61 unique without merges,
+every one read in full (`git show --stat -p`) by four parallel
+readers; claims that touch audition's own behavior were then
+re-verified on Ruby 4.0.6. The volume sits in Active Record
+model schema, Action View templates, Active Support
+notifications and callbacks, and routing. Every pattern from the
+first pass recurs; what follows is new, numbered on from the
+catalog.
+
+### 11. Delete the memo before relocating it
+
+The strongest new signal. Three commits remove a lazy class
+memo outright instead of making it Ractor-aware: a thread
+attribute key string is recomputed per call, a measured 1.6x to
+2x microbenchmark cost accepted (5777ec7432); a derived default
+drops its `||=` and recomputes from already cached values
+(9b6ec3b27e); an unbounded `Concurrent::Map` keyed by method
+names is replaced by a precomputed frozen index, with a 1.6x to
+2.7x slowdown on the uncached miss path documented in the
+commit (1a59302e64). Most telling: 46ee9525dc deletes a memo
+that 09783bcb7b had just wrapped in `on_main`, because an
+existing frozen structure (`columns_hash` plus `Symbol#name`)
+already answered the query. The order of preference is now:
+delete the cache, then hoist or warm it, and only then plumb
+it through Ractor APIs.
+
+### 12. Memo hygiene for the class-level `||=`
+
+- Configuration-free memos become frozen private constants:
+
+  ```ruby
+  # before
+  def self.empty
+    @empty ||= new(nil, nil).freeze
+  end
+  # after
+  EMPTY = new(nil, nil).freeze
+  private_constant :EMPTY
+  def self.empty = EMPTY
+  ```
+
+  (6bfcbc3115; verified: the `||=` form raises on cold access
+  from a worker even though the value would be frozen.)
+- Warm at load through the hierarchy: a class-body call plus an
+  `inherited` hook guarded by `subclass.name`, because anonymous
+  `Class.new` has no name yet (8123c3ed21), or an `eager_load!`
+  override that touches the memo before `super` (fd5ffed45b).
+- Interpolation is never auto-frozen: `@path ||= "#{a}/#{b}"`
+  needs an explicit `.freeze` even under the magic comment
+  (18fdd2f2c5).
+- A memo that can hold nil or false never sticks under `||=`, so
+  boot warming cannot pin it and a frozen owner raises
+  `FrozenError` on the next read; use `return @x if
+  defined?(@x)` (3189782fb2).
+- Assign before sharing. `@x ||= make_shareable(Obj.new)` loops
+  forever when `Obj#freeze` calls back into the owner, as
+  `ActiveModel::Name#freeze` does; write `return @x if @x; @x =
+  Obj.new; make_shareable(@x)` (c4dcf552cf; verified:
+  `SystemStackError` on Ruby 4.0.6 for the `||=` form).
+- The double-checked escape hatch for open class sets, where no
+  warmer can reach user-defined subclasses:
+
+  ```ruby
+  @x || ActiveSupport::Ractors.on_main(self) { @x ||= compute.freeze }
+  ```
+
+  (552d7d242f, 09783bcb7b, c64ab952dd, d3ac5cabaa). The read
+  stays dispatch-free; the memoized value must itself be
+  shareable; `try_make_shareable` replaces `.freeze` when user
+  procs may be embedded.
+
+### 13. Value objects freeze at the end of initialize
+
+Not a `#freeze` override (pattern 5) but an unconditional
+self-freeze as the last statement of `initialize`, with caller
+strings and arrays dup-frozen on the way in (`SimpleType`,
+622080e4e7; `Mime::Type`, 39034c8368; `AS::TimeZone` via
+`make_shareable(self)` because it owns a tzinfo object,
+26e78a20db; `Arel::Table`, 6f8650f9fc; the primary key objects
+at their factory, 741334f12d). Objects that accepted
+post-construction mutation gain an overridable template method
+that runs before the freeze: `PredicateBuilder#initialize` calls
+`register_handlers` and then `make_shareable(self)`, and the old
+`register_handler` call site becomes a subclass override
+(3ba8970f4a). Side effect to expect: tests that stub methods on
+such instances must `dup` them first.
+
+### 14. Non-literal constant values
+
+`# frozen_string_literal: true` covers literals only. Two late
+fixes were plain `.freeze` appends on a `String#tr` result
+(e5c5920bb2) and a `Regexp.new` (5d1a5d9f0f); two more replace a
+shallow `.freeze` at boot with `make_shareable` because users
+push unfrozen strings into the list (d0743addea), and
+deep-share a shallow-frozen constant after the class body has
+populated its nested hashes (4c30e8c6cd). Verified on Ruby
+4.0.6: `Regexp.new`, `Regexp.union`, `String#tr`, `+`, `*`, `%`,
+`format`, `String.new`, and `Symbol#to_s` all return unfrozen,
+unshareable objects, and reading such a constant from a Ractor
+raises. This is now an audition check (see below).
+
+### 15. define_method with a shareable lambda
+
+Rails converged on keeping `define_method` and passing an
+isolated lambda positionally rather than rewriting to
+`class_eval` strings everywhere:
+
+```ruby
+%w( sec min hour day month year ).each do |method|
+  name = method.to_sym
+  reader = ActiveSupport::Ractors.shareable_lambda do
+    @datetime.is_a?(Hash) ? @datetime[name] : @datetime.send(name)
+  end
+  define_method(method, reader)
+end
+```
+
+(6af668321f). Rules that fell out of the series: captured locals
+must be shareable (the String became a Symbol) and must be
+assigned before the lambda is created, since `shareable_lambda`
+refuses "outer variable may be reassigned" (c652246e15 moved a
+`Class.new` block's capture after the assignment); user-supplied
+procs go through `try_shareable_proc` and are passed positionally
+(35950bd1e9); procs stored into any registry are converted on
+insertion (57187b9d3a); `class_eval` strings remain the answer
+when the captures are literals (463a0620c8, flash types). Two
+subtler shapes: bind the lambda to a frozen receiver with
+`Ractor.shareable_lambda(self: obj)` so it may keep reading
+`@ivars`, converting once at the consumer instead of hoisting
+ivars into locals at every definition (4b2edb1e79, which reverted
+the hoisting version of 7edcc87b6a); and late binding through a
+shareable anchor, where a closure that captured `self` captures
+the enclosing Module instead and resolves the instance at call
+time, so the proc is shareable now and the instance becomes
+shareable later at its `finalize!` (0b1de97b43, url helpers).
+
+### 16. Registries: freeze in the last boot hook
+
+Configuration that plugins extend during boot is frozen in
+`after_initialize`, not at definition, and deep
+(`make_shareable`), not `.freeze` (cc70d62782, efd6072d58,
+6afe70b811); inline freezing stays correct only where nothing
+appends later (56d19e536b). Post-freeze writes are deprecated,
+not broken: merge into a fresh frozen copy and warn
+(73bdeced4f), with a two-phase variant where `eager_load!`
+shallow-freezes to stop mutation and `ractorize!` deep-shares
+later so boot-time registrants holding a Mutex keep working.
+Copy-on-write breaks identity, so every holder of the old
+reference needs repair: `DeprecatedObjectProxy#target=` and an
+`on_change` hook for the aliased `default_formats` (39034c8368).
+A copy-on-write proxy over a class-held collection must re-read
+the current value on every call and intercept every mutator,
+including `!` variants and `*_before`/`*_after` (dd67a577d9,
+640e8c25c1, 63847f40f9). Libraries whose public constants must
+stay mutable for compatibility ship an opt-in `ractorize` file
+that the application's entry point requires (c0db4bb1eb,
+`rack/ractorize`).
+
+### 17. Per-Ractor state for shared objects
+
+`ActiveSupport::Ractors.store_if_absent` joined the shim
+(444c16102d) with a Mutex-guarded `Ractor.current[key] ||=`
+fallback, and the mechanical rewrite is exactly what audition
+emits (bf6b888a7b: `@cache = Concurrent::Map.new` to `def
+self.cache = store_if_absent(:key) { Concurrent::Map.new }`,
+`map[k] ||= v` to `compute_if_absent`). New shapes on top of it:
+a Mutex constant becomes a Ractor-local mutex, justified only
+because the state it guards is per-Ractor too (911b897b97); a
+frozen object keeps mutable side state in a Ractor-local table
+keyed by itself behind a `frozen?` branch, and its `freeze`
+override nils the map and lock (285464aaca, 2afdfaf660, which
+also raises from `freeze` when lazy state cannot be pre-warmed);
+a per-class key derived from `object_id` is memoized on main in
+`inherited` (de26f6e7c8). For singletons that can never be
+frozen (a Mutex plus caches keyed by runtime input), Rails
+introduced snapshot-and-rehydrate: the main Ractor records
+`try_make_shareable(snapshot, copy: true)` after every mutation
+and each worker builds its own instance from it under
+`Ractor[:key] ||=`, formalized as a `to_ractor_snapshot` /
+`load_ractor_snapshot` protocol gated by `respond_to?`
+(a6b2abf05e, bd9ea455eb). The pitfall cd0f63ba4b fixed: a
+shared copy drops Hash default procs and freezes nested lists,
+so rehydrating writers must restore them. Bigger refactors land
+first and ractorize later: `SchemaContext` consolidates a
+model's interdependent lazy memos into one eagerly built object
+swapped by pointer, with its Ractor tests skipped for now
+(ae739c3854). Policy stays a dial: the test suite runs with
+`unshareable_proc_action = :warn` and still-unshareable executor
+callbacks deferred (1c03ccc2db), and the one correction in the
+series replaced a hand-rolled `:raise`-only gate with plain
+`try_make_shareable` (5eca1bc9a3): never reimplement the gate.
+
+Not fixed, for the record: I18n keeps configuration in class
+variables (stubbed in tests), `OpenSSL::Digest` builds its
+per-algorithm methods from closures (upstream), and
+`_returning_columns_for_insert` stays on `on_main` because it
+needs a connection.
+
+## What changed in audition after the second pass
+
+- Pattern 14 became a mutable-constants finding with a safe
+  `.freeze` autofix: String-only methods on any receiver,
+  String methods on literals, `format`, `String.new`, and the
+  `Regexp` factories. On Rails 8.1.3 it flags exactly the two
+  sites Rails fixed in e5c5920bb2 and 5d1a5d9f0f plus
+  `Regexp.union` constants in Active Support, Action Pack, mail,
+  and liquid, with no false positives.
+- The Rails macro rule is split. `cattr_*` and `mattr_*` stay
+  errors and point at the migration Rails made itself
+  (5d1a5d9f0f: `cattr_accessor` to `class_attribute`);
+  `class_attribute` and `thread_mattr_accessor` downgrade to a
+  warning carrying the frozen-default plus copy-on-write recipe,
+  since Rails 8.2 made their readers Ractor-safe.
+- The `define_method` advice leads with pattern 15.
+- Class-level state advice absorbs patterns 11, 12, 16, and 17.
+
+Declined, deliberately:
+
+- A Rails dialect emitting `ActiveSupport::Ractors.*`. The module
+  is `:nodoc:` and documented as disposable once old Rubies drop
+  off; audition keeps emitting plain Ruby.
+- An `on_main` autofix. It needs the ractor-dispatch gem and is
+  the last rung of Rails' own ladder.
+- Autofixes for deleting memos or hoisting them into constants.
+  Both change evaluation order or cost and need a human reading
+  the benchmark; the advice names the recipes instead.
+- Changing the freeze-on-memoize emitter to the assign-then-share
+  shape. Constructor memos are already left alone, which removes
+  the re-entrancy hazard from the generated code; the hazard is
+  documented above for hand-written fixes.
