@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.3] - Unreleased
+## [0.2.3] - 2026-08-22
 
 - Fix knowledge base refreshed from the latest fixes on Rails
   main: the 61 ractorization commits that landed after the first
