@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.4] - Unreleased
+## [0.2.4] - 2026-08-23
 
 - The mutable-constants check no longer crashes with a
   `NoMethodError` on a proc constant built from a block
