@@ -175,6 +175,7 @@ module Audition
             # a class or module body get the wrap.
             body = proc_body(value)
             wrappable = fix_ok && namespaced?(node) &&
+              !opaque_proc?(value) &&
               (body.nil? ||
                 RactorIsolation::CaptureScanner
                   .scan(body).empty?)
@@ -199,8 +200,14 @@ module Audition
         def proc_body(value)
           case value
           when Prism::LambdaNode then value.body
-          when Prism::CallNode then value.block&.body
+          when Prism::CallNode
+            block = value.block
+            block.body if block.is_a?(Prism::BlockNode)
           end
+        end
+
+        def opaque_proc?(value)
+          value.is_a?(Prism::CallNode) && value.block.is_a?(Prism::BlockArgumentNode)
         end
 
         def namespaced?(node)

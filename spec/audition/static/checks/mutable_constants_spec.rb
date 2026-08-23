@@ -142,6 +142,34 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     )
   end
 
+  it "handles procs built from a block argument" do
+    findings = findings_for(<<~RUBY)
+      module Matchers
+        TRUE_NODE = lambda(&:true_type?)
+        SHOUT = proc(&:upcase)
+        WRAPPED = Proc.new(&handler)
+      end
+    RUBY
+
+    expect(findings.size).to eq(3)
+    expect(findings).to all(
+      have_attributes(check: "mutable-constants")
+    )
+  end
+
+  it "withholds proc wraps when the block comes from elsewhere" do
+    findings = findings_for(<<~RUBY)
+      module Matchers
+        OPAQUE = lambda(&handler)
+        CLEAN = lambda { |msg| msg.to_s }
+      end
+    RUBY
+
+    by_name = findings.to_h { |f| [f.message[/[A-Z]+/], f] }
+    expect(by_name["OPAQUE"].autofix).to be_nil
+    expect(by_name["CLEAN"].autofix).not_to be_nil
+  end
+
   it "gates proc wraps on capture-free lambdas in a namespace" do
     findings = findings_for(<<~RUBY)
       TOP = ->(x) { x.to_s }
