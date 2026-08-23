@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.4] - Unreleased
+
+- The mutable-constants check no longer crashes with a
+  `NoMethodError` on a proc constant built from a block
+  argument (e.g. `TRUE_NODE = lambda(&:true_type?)`. [@viralpraxis](https://github.com/viralpraxis)
+- A proc constant whose block arrives as `&expr` gets no
+  `Ractor.make_shareable` autofix. There is no body for the
+  capture scanner to read, so the wrap cannot be shown safe. [@viralpraxis](https://github.com/viralpraxis)
+
 ## [0.2.3] - 2026-08-22
 
 - Fix knowledge base refreshed from the latest fixes on Rails
