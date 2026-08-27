@@ -23,6 +23,14 @@
   every commit through lefthook (staged files, static) and on
   every push through a non-blocking CI self-audit with PR
   annotations and a job summary.
+- Dynamic dependency attribution now matches the static
+  scanner's exclusion rule: constants whose source lives in a
+  vendored or dot directory under the target root (Bundler's
+  deployment mode and Actions' bundler-cache put every gem in
+  `vendor/bundle`) count as dependencies, not as the target's
+  own code. Found by the very first CI self-audit, which
+  attributed the vendored gems to audition itself and flipped
+  the verdict from blocked to not_ready.
 - Report rendering split into one class per format
   (`Report::Text`, `Report::Json`, `Report::Github`); the
   `Report` class keeps only the data, verdict, and counts. The

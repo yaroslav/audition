@@ -246,6 +246,51 @@ RSpec.describe Audition::Dynamic::Prober do
         end
       end
     end
+
+    # bundler-cache in GitHub Actions vendors every gem into
+    # <root>/vendor/bundle; attributing those paths to the target
+    # flipped its self-audit from blocked to not_ready.
+    it "attributes vendored bundle gems as dependencies" do
+      Dir.mktmpdir do |dir|
+        gem_lib = "vendor/bundle/ruby/4.0.0/gems/" \
+                  "vendored_dep-1.0.0/lib"
+        write(dir, "lib/own_app.rb", <<~RUBY)
+          require "vendored_dep"
+          module OwnApp
+          end
+        RUBY
+        write(dir, "#{gem_lib}/vendored_dep.rb", <<~RUBY)
+          module VendoredDep
+            DIRTY = [1, 2, 3]
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "own_app",
+          load_paths: [File.join(dir, "lib"),
+            File.join(dir, gem_lib)],
+          root: dir
+        )
+
+        dirty = result.findings.find do |f|
+          f.message.include?("DIRTY")
+        end
+        expect(dirty.dependency?).to be(true)
+        expect(result.passed).to be(true)
+      end
+    end
+
+    it "keeps the harness exclusion list in sync with Target" do
+      unless defined?(AuditionHarness)
+        load File.expand_path(
+          "../../../lib/audition/dynamic/harness.rb", __dir__
+        )
+      end
+
+      expect(AuditionHarness::EXCLUDED_DIRS)
+        .to eq(Audition::Target::EXCLUDED_DIRS)
+    end
   end
 
   describe "rack probing" do

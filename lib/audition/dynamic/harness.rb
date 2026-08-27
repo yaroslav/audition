@@ -16,6 +16,18 @@ require "json"
 module AuditionHarness
   MAX_CONSTS = 5000
 
+  # Directories under the target root that are not the target's
+  # own surface. Bundler's deployment mode (and bundler-cache in
+  # GitHub Actions) vendors every gem into <root>/vendor/bundle,
+  # and attributing those constants to the target would flip its
+  # verdict from blocked to not_ready. Must mirror
+  # Audition::Target::EXCLUDED_DIRS (this file is a standalone
+  # subprocess script and cannot require the gem); a spec keeps
+  # the two lists in sync.
+  EXCLUDED_DIRS = %w[
+    vendor node_modules tmp log coverage pkg .git .bundle
+  ].freeze
+
   # Fixtures for capability probes.
   CAP_CONST = [1, 2] # audition:disable mutable-constants
 
@@ -218,8 +230,19 @@ module AuditionHarness
     end
     # The separator matters: /x/app must not claim /x/app-helpers.
     own = root.nil? || path.nil? || path == root ||
-      path.start_with?(root + File::SEPARATOR)
+      (path.start_with?(root + File::SEPARATOR) &&
+        !excluded?(path, root))
     {"path" => path, "line" => line, "own" => own}
+  end
+
+  # Matches the static scanner's exclusion rule: any excluded or
+  # dot-prefixed component in the root-relative path means the
+  # file is not the target's own code.
+  def excluded?(path, root)
+    relative = path.delete_prefix(root + File::SEPARATOR)
+    relative.split(File::SEPARATOR).any? do |part|
+      EXCLUDED_DIRS.include?(part) || part.start_with?(".")
+    end
   end
 
   def inspect_module(full, mod, origin, class_state, class_vars)
