@@ -30,7 +30,7 @@ RSpec.describe Audition::Config do
 
     it "accepts every valid fail_on level" do
       Dir.mktmpdir do |dir|
-        %w[error warning info].each do |level|
+        %w[error warning info never].each do |level|
           write_config(dir, "fail_on: #{level}\n")
 
           config = described_class.load(dir)

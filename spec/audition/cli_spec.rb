@@ -449,6 +449,123 @@ RSpec.describe Audition::CLI do
     expect(err).to include("not a file, directory")
   end
 
+  it "appends a markdown summary to GITHUB_STEP_SUMMARY" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "bad.rb")
+      File.write(path, "$boom = 1\n")
+      summary = File.join(dir, "summary.md")
+      ENV["GITHUB_STEP_SUMMARY"] = summary
+
+      _, out, = run(path, "--static-only", "--format", "github")
+
+      expect(out).to include("::error")
+      expect(File.read(summary)).to include("not ractor-ready")
+    ensure
+      ENV.delete("GITHUB_STEP_SUMMARY")
+    end
+  end
+
+  it "annotates failing gems in a --format github sweep" do
+    Dir.mktmpdir do |dir|
+      lock = stub_sweep(dir, [
+        sweep_row(name: "baddy", verdict: :not_ready, errors: 3),
+        sweep_row(name: "warny", verdict: :risky, warnings: 2),
+        sweep_row(name: "goody", verdict: :ready, warnings: 0)
+      ])
+
+      _, out, = run(lock, "--static-only", "--format", "github")
+
+      expect(out).to match(/^::error .*baddy/)
+      expect(out).to match(/^::warning .*warny/)
+      expect(out).not_to match(/^::\w+ .*goody/)
+      expect(out).to include("1 of 3 gems ractor-ready")
+      expect(out).not_to include("\e[")
+    end
+  end
+
+  it "audits several Ruby files as one static target" do
+    Dir.mktmpdir do |dir|
+      a = File.join(dir, "a.rb")
+      b = File.join(dir, "b.rb")
+      File.write(a, "$one = 1\n")
+      File.write(b, "$two = 2\n")
+
+      status, out, = run(a, b)
+
+      expect(status).to eq(1)
+      expect(out).to include("$one")
+      expect(out).to include("$two")
+    end
+  end
+
+  it "reads .audition.yml from the working directory for " \
+     "file lists" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "a.rb"),
+        "def l = require \"json\"\n")
+      File.write(File.join(dir, "b.rb"), "puts 1\n")
+      File.write(File.join(dir, ".audition.yml"),
+        "fail_on: warning\n")
+
+      status = Dir.chdir(dir) do
+        s, = run("a.rb", "b.rb")
+        s
+      end
+
+      expect(status).to eq(1)
+    end
+  end
+
+  it "rejects a file list that mixes in a directory" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "a.rb")
+      File.write(path, "puts 1\n")
+
+      status, _, err = run(path, dir)
+
+      expect(status).to eq(2)
+      expect(err).to include("not a Ruby file")
+    end
+  end
+
+  it "reports findings but exits 0 under --fail-on never" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "bad.rb")
+      File.write(path, "$boom = 1\n")
+
+      status, out, = run(path, "--static-only",
+        "--fail-on", "never")
+
+      expect(status).to eq(0)
+      expect(out).to include("$boom")
+      expect(out).to include("not ractor-ready")
+    end
+  end
+
+  it "treats --exit-zero as an alias for --fail-on never" do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "bad.rb")
+      File.write(path, "$boom = 1\n")
+
+      status, out, = run(path, "--static-only", "--exit-zero")
+
+      expect(status).to eq(0)
+      expect(out).to include("$boom")
+    end
+  end
+
+  it "applies --exit-zero to sweep exit codes" do
+    Dir.mktmpdir do |dir|
+      lock = stub_sweep(dir, [sweep_row(verdict: :not_ready,
+        errors: 3)])
+
+      status, out, = run(lock, "--static-only", "--exit-zero")
+
+      expect(status).to eq(0)
+      expect(out).to include("warny")
+    end
+  end
+
   it "honors --fail-on warning" do
     Dir.mktmpdir do |dir|
       path = File.join(dir, "warny.rb")

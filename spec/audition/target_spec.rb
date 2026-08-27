@@ -128,4 +128,44 @@ RSpec.describe Audition::Target do
     expect { described_class.detect("definitely-not-a-gem-xyz") }
       .to raise_error(Audition::Error, /not a file, directory/)
   end
+
+  describe ".for_files" do
+    it "builds a static-only target from a list of Ruby files" do
+      in_tmpdir do |dir|
+        a = File.join(dir, "a.rb")
+        b = File.join(dir, "b.rb")
+        File.write(a, "puts 1\n")
+        File.write(b, "puts 2\n")
+
+        target = described_class.for_files([a, b])
+
+        expect(target.type).to eq(:files)
+        expect(target.ruby_files).to eq([a, b])
+        expect(target.entry).to be_nil
+        expect(target.root).to eq(Dir.pwd)
+      end
+    end
+
+    it "rejects a list containing a non-Ruby file" do
+      in_tmpdir do |dir|
+        rb = File.join(dir, "a.rb")
+        md = File.join(dir, "notes.md")
+        File.write(rb, "puts 1\n")
+        File.write(md, "hi\n")
+
+        expect { described_class.for_files([rb, md]) }
+          .to raise_error(Audition::Error, /not a Ruby file/)
+      end
+    end
+
+    it "rejects a list containing a directory" do
+      in_tmpdir do |dir|
+        rb = File.join(dir, "a.rb")
+        File.write(rb, "puts 1\n")
+
+        expect { described_class.for_files([rb, dir]) }
+          .to raise_error(Audition::Error, /not a Ruby file/)
+      end
+    end
+  end
 end

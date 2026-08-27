@@ -23,7 +23,7 @@ module Audition
        disabled_checks: []}
     )
 
-    FAIL_ON_LEVELS = %w[error warning info].freeze
+    FAIL_ON_LEVELS = %w[error warning info never].freeze
 
     attr_reader :fail_on, :timeout, :exclude, :disabled_checks
 
@@ -59,8 +59,8 @@ module Audition
         FAIL_ON_LEVELS.include?(fail_on.to_s)
 
       raise Error,
-        "#{path}: fail_on must be one of error, warning, or " \
-        "info (got #{fail_on.inspect})"
+        "#{path}: fail_on must be one of error, warning, " \
+        "info, or never (got #{fail_on.inspect})"
     end
     private_class_method :validate!
 

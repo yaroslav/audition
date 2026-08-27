@@ -43,6 +43,30 @@ module Audition
       end
     end
 
+    # Builds a static-only target from an explicit file list, the
+    # shape git hooks hand over (lefthook's {staged_files},
+    # pre-commit's filename arguments). Config, pragmas, and the
+    # baseline resolve against the working directory, which is the
+    # repository root when a hook manager runs the command.
+    #
+    # @param paths [Array<String>] `.rb`/`.ru` files
+    # @return [Target] type `:files`, no dynamic entry
+    # @raise [Audition::Error] when a path is not a Ruby file
+    def self.for_files(paths)
+      paths.each do |path|
+        unless File.file?(path) && path.end_with?(".rb", ".ru")
+          raise Error, "#{path} is not a Ruby file"
+        end
+      end
+
+      new(
+        type: :files,
+        root: Dir.pwd,
+        ruby_files: paths,
+        entry: nil
+      )
+    end
+
     def self.from_file(path)
       if File.basename(path) == "Gemfile.lock"
         return new(

@@ -1,13 +1,14 @@
 # frozen_string_literal: true
 
+require "json"
 require "optparse"
 require "table_tennis"
 
 module Audition
   class CLI
-    USAGE = "usage: audition [options] TARGET " \
+    USAGE = "usage: audition [options] TARGET [FILE...] " \
             "(a .rb script, directory, config.ru dir, Rails root, " \
-            "gem dir, or installed gem name)"
+            "gem dir, installed gem name, or several .rb files)"
 
     # Entry point used by `exe/audition`.
     #
@@ -31,13 +32,20 @@ module Audition
 
       return print_capabilities(options) if options[:capabilities]
 
-      target_arg = options[:args].first
-      unless target_arg
+      args = options[:args]
+      if args.empty?
         @stderr.puts(USAGE)
         return 2
       end
 
-      target = Target.detect(target_arg)
+      # A single argument keeps full detection (including the
+      # dynamic probe); several arguments are the git-hook shape,
+      # a plain list of staged .rb files audited statically.
+      target = if args.size == 1
+        Target.detect(args.first)
+      else
+        Target.for_files(args)
+      end
       target = deps_target(target) if options[:deps]
       if target.type == :bundle
         sweep(target, options)
@@ -89,9 +97,16 @@ module Audition
           "with --fix: show planned edits, change nothing") do
           options[:dry_run] = true
         end
-        o.on("--fail-on LEVEL", %w[error warning info],
-          "exit 1 threshold (default: error)") do |v|
+        o.on("--fail-on LEVEL", %w[error warning info never],
+          "exit 1 threshold (default: error); never always " \
+          "exits 0") do |v|
           options[:fail_on] = v.to_sym
+          options[:explicit] << :fail_on
+        end
+        o.on("--exit-zero",
+          "report findings but exit 0 (same as " \
+          "--fail-on never)") do
+          options[:fail_on] = :never
           options[:explicit] << :fail_on
         end
         o.on("--write-baseline",
@@ -312,10 +327,31 @@ module Audition
 
     def emit(report, options)
       case options[:format]
-      when :json then @stdout.puts(report.to_json)
-      when :github then @stdout.puts(report.to_github)
-      else @stdout.puts(report.to_text(style: style(options)))
+      when :json
+        @stdout.puts(Report::Json.new(report).render)
+      when :github
+        github = Report::Github.new(report)
+        @stdout.puts(github.render)
+        append_step_summary(github.summary)
+      else
+        @stdout.puts(
+          Report::Text.new(report, style(options)).render
+        )
       end
+    end
+
+    # GitHub Actions exposes the job summary as an appendable
+    # file; outside Actions the variable is absent and this is a
+    # no-op. A broken path must not fail the audit itself.
+    def append_step_summary(markdown)
+      path = ENV["GITHUB_STEP_SUMMARY"]
+      return if path.nil? || path.empty?
+
+      File.open(path, "a") { |f| f.puts(markdown) }
+    rescue SystemCallError => e
+      @stderr.puts(
+        "audition: cannot write step summary: #{e.message}"
+      )
     end
 
     def style(options, io: @stdout)
@@ -327,6 +363,8 @@ module Audition
     end
 
     def exit_code(report, options)
+      return 0 if options[:fail_on] == :never
+
       threshold = SEVERITIES.fetch(options[:fail_on])
       failed =
         report.findings.any? do |f|
@@ -359,11 +397,13 @@ module Audition
       )
       rows = sweeper.rows(progress: sweep_progress)
 
-      if options[:format] == :json
-        emit_sweep_json(rows)
-      else
-        emit_sweep_table(rows, options)
+      case options[:format]
+      when :json then emit_sweep_json(rows)
+      when :github then emit_sweep_github(rows)
+      else emit_sweep_table(rows, options)
       end
+      return 0 if options[:fail_on] == :never
+
       threshold = SEVERITIES.fetch(options[:fail_on])
       (rows.any? { |r| row_failed?(r, threshold) }) ? 1 : 0
     end
@@ -419,6 +459,53 @@ module Audition
       @stdout.puts(
         "#{ready} of #{rows.size} gems ractor-ready"
       )
+    end
+
+    # Sweep rows carry no file or line, so the annotations land on
+    # the run summary rather than a diff; the markdown table goes
+    # to the job summary page when Actions provides one.
+    def emit_sweep_github(rows)
+      ready = rows.count { |r| r.verdict == :ready }
+      rows.each do |row|
+        level = sweep_annotation_level(row)
+        next unless level
+
+        @stdout.puts(
+          "::#{level} title=audition::gem #{row.name} " \
+          "#{row.version}: #{row.errors} errors, " \
+          "#{row.dep_errors} dependency errors, " \
+          "#{row.warnings} warnings " \
+          "(#{VERDICT_CELLS.fetch(row.verdict)})"
+        )
+      end
+      @stdout.puts("#{ready} of #{rows.size} gems ractor-ready")
+      append_step_summary(sweep_summary_markdown(rows, ready))
+    end
+
+    def sweep_annotation_level(row)
+      if row.verdict == :not_ready ||
+          (row.errors + row.dep_errors).positive?
+        "error"
+      elsif row.warnings.positive?
+        "warning"
+      end
+    end
+
+    def sweep_summary_markdown(rows, ready)
+      lines = [
+        "## audition bundle sweep", "",
+        "| gem | version | verdict | errors | dep errors " \
+        "| warnings | fixable |",
+        "| --- | --- | --- | --- | --- | --- | --- |"
+      ]
+      rows.each do |r|
+        lines << "| #{r.name} | #{r.version} | " \
+          "#{VERDICT_CELLS.fetch(r.verdict)} | #{r.errors} | " \
+          "#{r.dep_errors} | #{r.warnings} | #{r.fixable} |"
+      end
+      lines << ""
+      lines << "#{ready} of #{rows.size} gems ractor-ready"
+      lines.join("\n")
     end
 
     def emit_sweep_json(rows)

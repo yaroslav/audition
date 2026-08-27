@@ -27,6 +27,18 @@ RSpec.describe Audition::Report do
     )
   end
 
+  def render_text(report, style)
+    Audition::Report::Text.new(report, style).render
+  end
+
+  def render_github(report)
+    Audition::Report::Github.new(report).render
+  end
+
+  def render_json(report)
+    Audition::Report::Json.new(report).render
+  end
+
   describe "#verdict" do
     it "is not_ready when any error exists" do
       expect(report_for([finding]).verdict).to eq(:not_ready)
@@ -72,7 +84,7 @@ RSpec.describe Audition::Report do
       style = Audition::Report::Style.new(
         color: true, hyperlinks: true
       )
-      text = report_for([finding]).to_text(style: style)
+      text = render_text(report_for([finding]), style)
 
       expect(text).to include("✖")
       expect(text).to include("\e[")
@@ -85,7 +97,7 @@ RSpec.describe Audition::Report do
       style = Audition::Report::Style.new(
         color: false, hyperlinks: false
       )
-      text = report_for([finding]).to_text(style: style)
+      text = render_text(report_for([finding]), style)
 
       expect(text).not_to include("\e[")
       expect(text).not_to include("\e]8")
@@ -105,7 +117,7 @@ RSpec.describe Audition::Report do
         unsafe_fixes: 3
       )
 
-      expect(report.to_text(style: style))
+      expect(render_text(report, style))
         .to include("3 edits with --fix-unsafe")
     end
 
@@ -118,7 +130,7 @@ RSpec.describe Audition::Report do
       style = Audition::Report::Style.new(
         color: false, hyperlinks: false
       )
-      text = report_for([fixable]).to_text(style: style)
+      text = render_text(report_for([fixable]), style)
 
       expect(text).to match(/1 fixable/)
     end
@@ -133,7 +145,7 @@ RSpec.describe Audition::Report do
       style = Audition::Report::Style.new(
         color: false, hyperlinks: false
       )
-      text = report_for([unsafe]).to_text(style: style)
+      text = render_text(report_for([unsafe]), style)
 
       expect(report_for([unsafe]).counts[:fixable]).to eq(0)
       expect(text).not_to include("fixable")
@@ -143,11 +155,11 @@ RSpec.describe Audition::Report do
       style = Audition::Report::Style.new(
         color: false, hyperlinks: false
       )
-      one = report_for([
+      one = render_text(report_for([
         finding, finding(severity: :warning),
         finding(dependency: true)
-      ]).to_text(style: style)
-      two = report_for([finding, finding]).to_text(style: style)
+      ]), style)
+      two = render_text(report_for([finding, finding]), style)
 
       expect(one).not_to include("1 errors")
       expect(one).not_to include("1 warnings")
@@ -161,7 +173,7 @@ RSpec.describe Audition::Report do
         color: false, hyperlinks: false
       )
       long = finding.with(why: "See #{url}.")
-      text = report_for([long]).to_text(style: style)
+      text = render_text(report_for([long]), style)
 
       expect(text).to include("https://example.com/")
       expect(text.count("z")).to eq(90)
@@ -170,7 +182,7 @@ RSpec.describe Audition::Report do
 
   describe "github format" do
     it "emits workflow command annotations" do
-      out = report_for([finding]).to_github
+      out = render_github(report_for([finding]))
 
       expect(out).to include(
         "::error file=lib/a.rb,line=3,title=audition " \
@@ -184,16 +196,34 @@ RSpec.describe Audition::Report do
     it "property-escapes file and title in annotations" do
       weird = finding(path: "lib/a,b%:c.rb")
 
-      out = report_for([weird]).to_github
+      out = render_github(report_for([weird]))
 
       expect(out).to include("file=lib/a%2Cb%25%3Ac.rb,line=3,")
       expect(out).to include("title=audition global-variables::")
+    end
+
+    it "strips the ./ prefix so annotations anchor to files" do
+      dotted = finding(path: "./lib/a.rb")
+
+      out = render_github(report_for([dotted]))
+
+      expect(out).to include("::error file=lib/a.rb,line=3,")
+    end
+
+    it "renders a markdown step summary" do
+      md = Audition::Report::Github.new(report_for([
+        finding, finding(severity: :warning)
+      ])).summary
+
+      expect(md).to include("## audition: not ractor-ready")
+      expect(md).to include("| errors | 1 |")
+      expect(md).to include("| warnings | 1 |")
     end
   end
 
   describe "json format" do
     it "serializes findings, summary, and verdict" do
-      json = JSON.parse(report_for([finding]).to_json)
+      json = JSON.parse(render_json(report_for([finding])))
 
       expect(json["verdict"]).to eq("not_ready")
       expect(json["summary"]["errors"]).to eq(1)
@@ -205,7 +235,7 @@ RSpec.describe Audition::Report do
 
     it "splits dependency errors out in the summary" do
       json = JSON.parse(
-        report_for([finding(dependency: true)]).to_json
+        render_json(report_for([finding(dependency: true)]))
       )
 
       expect(json["verdict"]).to eq("blocked")
