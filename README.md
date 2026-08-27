@@ -41,7 +41,9 @@ core itself is being ractorized; see the
   state, so `globalid` is not blamed for ActiveSupport's state.
 - **Dogfooding.** The scanner for Ractor compatibility is built
   using Ractors: static analysis fans out across CPU cores on
-  Ractor workers, and audition passes its own audit.
+  Ractor workers, and audition passes its own audit. It runs on
+  itself on every commit (a lefthook pre-commit over the staged
+  files) and on every push (a full self-audit in CI).
 - **Trained on Rails core.** Several checks and fix suggestions
   come straight from studying the Rails ractorization effort
   (about 75 substantive commits): `Hash.new` default procs,
@@ -112,6 +114,7 @@ proxying) and its verified semantics.
 - [Installation](#installation)
 - [Usage](#usage)
 - [Adopting incrementally](#adopting-incrementally)
+- [CI and git hooks](#ci-and-git-hooks)
 - [What it catches](#what-it-catches)
 - [Agent skill](#agent-skill)
 - [Extending](#extending)
@@ -140,6 +143,7 @@ audition path/to/gem-checkout # a gem working copy (*.gemspec)
 audition path/to/rack-app     # a config.ru directory
 audition path/to/rails-root   # a Rails application
 audition lib                  # any directory, static-only
+audition a.rb b.rb c.rb       # several files at once, statically
 audition Gemfile.lock         # sweep every gem in the bundle
 audition path/to/app --deps   # same, from the app root
 ```
@@ -154,16 +158,19 @@ Useful flags:
 | `--fix-unsafe` | also apply semantics-affecting corrections |
 | `--dry-run` | with a fix flag: preview edits, change nothing |
 | `--format json` | machine-readable report for CI |
-| `--format github` | GitHub Actions annotations on PR diffs |
+| `--format github` | GitHub Actions annotations + job summary |
 | `--compare old.json` | delta vs a previous report: fixed/introduced |
 | `--static-only` / `--dynamic-only` | pick one probe layer |
 | `--fail-on warning` | stricter CI gate (default: error) |
+| `--exit-zero` | report findings but never fail the build |
 | `--capabilities` | table of what this Ruby allows in Ractors |
 | `--timeout 60` | dynamic probe budget in seconds |
 | `--plain` | no colors or hyperlinks (also via NO_COLOR, pipes) |
 
 Exit codes: `0` clean, `1` findings at or above the `--fail-on`
 threshold (or a failed dynamic probe), `2` usage error.
+`--exit-zero` (alias for `--fail-on never`) always exits `0`
+unless the invocation itself is broken.
 
 ## Adopting incrementally
 
@@ -201,6 +208,71 @@ checks:
   disable:
     - at-exit
 ```
+
+## CI and git hooks
+
+**GitHub Actions.** `--format github` turns findings into
+workflow-command annotations that land right on the PR diff, and
+appends a verdict-plus-counts markdown table to the job summary
+page. A blocking gate:
+
+```yaml
+- uses: ruby/setup-ruby@v1
+  with:
+    ruby-version: "4.0"
+- run: gem install audition
+- run: audition --format github .
+```
+
+To surface findings without failing the build while you adopt
+(the flag other linters call `--exit-zero` too, so it keeps its
+name here):
+
+```yaml
+- run: audition --format github --exit-zero .
+```
+
+`--fail-on never` is the long form, and works from
+`.audition.yml` as well; GitHub's own `continue-on-error: true`
+on the step is the workflow-level equivalent.
+
+**Git hooks.** Passing several `.rb` files audits exactly those
+files statically, which is the shape hook managers hand over.
+With [lefthook](https://github.com/evilmartians/lefthook):
+
+```yaml
+pre-commit:
+  commands:
+    audition:
+      glob: "*.rb"
+      run: audition --static-only --plain {staged_files}
+```
+
+With [pre-commit](https://pre-commit.com):
+
+```yaml
+- repo: local
+  hooks:
+    - id: audition
+      name: audition
+      language: system
+      entry: audition --static-only --plain
+      types: [ruby]
+```
+
+Config, pragmas, and the baseline resolve against the working
+directory, so a hook run from the repository root honors the
+same `.audition.yml` as a full audit.
+
+**This repository eats its own dog food.** Every commit runs
+`audition --static-only` over the staged files through lefthook
+(next to standardrb), and every push and pull request gets a
+full self-audit in CI with annotations and a job summary,
+non-blocking via `--exit-zero`
+([audit.yml](.github/workflows/audit.yml)). Current state: own
+code audits `ready`; the full dynamic probe reports the terminal
+dev-dependencies as `blocked`, which is exactly the distinction
+the verdict system exists to make.
 
 ## What it catches
 
@@ -305,7 +377,7 @@ Audition::Static::Checks.register(NoSleep)
 bundle install
 bundle exec rake spec       # RSpec suite
 bundle exec rake standard   # standardrb lint
-lefthook install            # pre-commit lint hook
+lefthook install            # pre-commit standardrb + audition
 bundle exec exe/audition --capabilities
 ```
 

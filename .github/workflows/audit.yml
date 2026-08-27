@@ -1,0 +1,29 @@
+name: Self-audit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audition:
+    name: audition audits audition
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+
+      # The gem runs on itself: findings annotate the PR diff and
+      # the verdict lands on the job summary page. --exit-zero
+      # keeps the audit informational; the full dynamic probe
+      # also reports dev-dependency findings (terminal gems) that
+      # are not this gem's bugs and must not block a build.
+      - name: audition .
+        run: bundle exec audition --format github --exit-zero .

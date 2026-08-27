@@ -1,5 +1,34 @@
 # Changelog
 
+## [Unreleased]
+
+- CI-ready. `--exit-zero` (alias for the new `--fail-on never`,
+  also accepted in `.audition.yml`) reports every finding but
+  always exits 0, the adoption mode other linters ship under the
+  same name. `--format github` now also appends a verdict and
+  counts markdown table to the job summary page when GitHub
+  Actions provides one, strips `./` prefixes so annotations
+  anchor to the PR diff, and works for bundle sweeps: one
+  annotation per failing gem plus the readiness line, instead of
+  a terminal table.
+- Git-hook-ready. Several `.rb` file arguments now audit as one
+  static target, the shape hook managers pass staged files in
+  (lefthook's `{staged_files}`, pre-commit's filename
+  arguments); config, pragmas, and the baseline resolve against
+  the working directory. Previously everything after the first
+  argument was silently ignored. README gained a CI and git
+  hooks section with copy-paste lefthook, pre-commit, and
+  GitHub Actions configs.
+- Dogfooding: this repository now runs audition on itself, on
+  every commit through lefthook (staged files, static) and on
+  every push through a non-blocking CI self-audit with PR
+  annotations and a job summary.
+- Report rendering split into one class per format
+  (`Report::Text`, `Report::Json`, `Report::Github`); the
+  `Report` class keeps only the data, verdict, and counts. The
+  `Report#to_text/to_json/to_github` methods are gone, an API
+  change for anyone driving audition programmatically.
+
 ## [0.2.4] - 2026-08-23
 
 - The mutable-constants check no longer crashes with a

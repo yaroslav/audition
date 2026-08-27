@@ -5,3 +5,7 @@ pre-commit:
       tags: ruby style
       glob: "*.{rb,rake}"
       run: bundle exec standardrb {staged_files}
+    audition:
+      tags: ruby ractor
+      glob: "*.rb"
+      run: bundle exec audition --static-only --plain {staged_files}

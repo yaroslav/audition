@@ -35,6 +35,8 @@ against audition 0.2.x.
 | Apply fixes | `--fix` (safe), `--fix-unsafe` |
 | Rank all dependencies | `audition <dir>/Gemfile.lock` |
 | CI gate | `-f github` or `-f json`, `--fail-on warning` |
+| CI, non-blocking | add `--exit-zero` (= `--fail-on never`) |
+| Git hook | `audition --static-only --plain <staged .rb files>` |
 | Incremental adoption | `--write-baseline`, `.audition.yml`, pragmas |
 
 The tool runs on Ruby 4.0+ (targets may support older Rubies).
