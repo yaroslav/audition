@@ -11,6 +11,10 @@ graph. Some of the checks and fixes were trained on how Rails
 core itself is being ractorized; see the
 [pattern study](docs/rails_core_best_practices.md).
 
+<div align="center">
+  <img src="https://raw.githubusercontent.com/yaroslav/audition/refs/heads/main/assets/images/audition.png" width="512" height="512" alt="gem audition" title="gem audition">
+</div>
+
 [![GitHub Release](https://img.shields.io/github/v/release/yaroslav/audition)](https://github.com/yaroslav/audition/releases)
 [![Docs](https://img.shields.io/badge/yard-docs-blue.svg)](https://rubydoc.info/gems/audition)
 
