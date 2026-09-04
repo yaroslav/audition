@@ -483,3 +483,126 @@ Declined, deliberately:
   shape. Constructor memos are already left alone, which removes
   the re-entrancy hazard from the generated code; the hazard is
   documented above for hand-written fixes.
+
+## Third pass: the gem dialect (i18n PR 741)
+
+Studied 2026-09-04: ruby-i18n/i18n#741 "Ractor support" by the
+engineer leading the Rails ractorization (open, head 58aa1dc).
+The first full gem-side conversion out of that effort, and the
+fix for the residual recorded at the end of the second pass
+("I18n keeps configuration in class variables"). Method: the
+diff and every review comment read in full, audition run on
+both sides of the PR (static and dynamic), and every Ruby
+semantics claim below re-verified on Ruby 4.0.6.
+
+### 18. Config singletons: class variables to class-level ivars
+
+The bulk of the PR converts `@@backend`-style config storage to
+ivars on the singleton class, with one-line instance delegators
+(`def backend; Config.backend; end`) preserving the public API.
+The Ruby rules doing the work, verified on 4.0.6:
+
+- Class-variable access from a non-main Ractor raises
+  Ractor::IsolationError even for reads, and even when the value
+  is shareable ("can not access class variables").
+- Class-level ivars are readable from workers when the value is
+  shareable, raise when it is not, and are never writable.
+
+So the conversion alone buys nothing for a lazy `||=` reader:
+the cold-path write still raises from a worker. It pays off only
+combined with boot-time warming plus `make_shareable` of every
+value, which is the next pattern.
+
+### 19. The opt-in ractorize file
+
+`require "i18n/ractorize"` is the gem-side capstone, mirroring
+`Rails::Application#ractorize!` (pattern 6) and `rack/ractorize`
+(pattern 16): eager_load, re-assign `available_locales` to
+itself to materialize the backend-derived value, make_shareable
+each config value, touch every reader so no memo stays cold,
+drop the owner link, then make_shareable the config object.
+Verified end to end on the PR head: store translations, require
+the file, and `I18n.translate(:greet, name: "world")` inside a
+Ractor returns the interpolated string, with missing keys going
+through the shared exception handler.
+
+Two compatibility moves ride along. The legacy mutable constant
+becomes a frozen alias of the new state plus `deprecate_constant`
+(`RESERVED_KEYS = @reserved_keys`), the plain-Ruby version of
+pattern 8's DeprecatedObjectProxy. And per-Ractor caches get a
+portability guard for pre-3.0 rubies: `if defined?(Ractor)` uses
+`Ractor.current[key] ||=` (the shape audition emits) and the
+else branch keeps the old class variable. Statically that
+fallback scans as a class-variables error; dynamically the
+branch never runs on 4.0, so the class variable is never even
+created and the probe clears it. A pragma on the fallback line
+is the honest encoding.
+
+### 20. Frozen caches degrade to recompute
+
+`Fallbacks#[]` becomes `super || (frozen? ? compute(locale) :
+store(locale, compute(locale)))`: a cache that can no longer
+store simply recomputes per call, the read-side answer to
+pattern 11's delete-the-memo. The unset default is allocated
+frozen on every read instead of memoized, and a custom `freeze`
+deep-freezes `@map` and `@defaults` first (pattern 5). Two more
+deletions in the same spirit: `eval(IO.read(f), binding)`
+becomes `instance_eval` on a frozen, stateless context Object,
+and the Simple backend's lazily vivifying `Concurrent::Hash`
+default proc with a Mutex inside it becomes a plain
+`Concurrent::Hash`, accepting a behavior change (unknown locale
+reads return nil, not a vivified empty hash).
+
+Mid-review color: the first version rebuilt the interpolation
+pattern cache copy-on-write behind a Hash default proc, and the
+author scrapped it himself ("This was wrong. We can't have
+default procs in the hash."). The default-proc rule bites even
+the people leading the Rails effort.
+
+### What audition says about the PR (verified)
+
+On pre-PR main (547917d), the static scan flags everything the
+PR fixes: RESERVED_KEYS mutable Array plus in-place `<<`,
+INTERPOLATION_PATTERNS_CACHE default proc, and some thirty
+class-variable sites; the require probe adds six runtime errors.
+On the PR head the class-variable errors are gone, runtime
+errors drop to three, and the warmed state surfaces as info
+notes ("shareable; warm on the main Ractor"). The static verdict
+stays not_ready, though, and correctly so: every `@@var` became
+a lazy `||=` class-ivar memo that is only safe after the opt-in
+ractorize file runs, and no static scan can see a file the
+application must choose to require.
+
+Three residuals audition catches are real, two worth reporting
+upstream:
+
+- INTERPOLATION_PATTERN lost its `.freeze` in a rebase (the PR
+  body claims it is frozen; the first review thread shows the
+  freeze existed before the scrapped approach took it away).
+  audition marks it fixable.
+- `@@fallbacks` survives, and the reader's comment claims class
+  variable reads are safe from workers. Reproduced: with the
+  fallbacks backend loaded and ractorize applied,
+  `I18n.fallbacks[:en]` from a worker raises IsolationError at
+  the `Fiber[:i18n_fallbacks] || @@fallbacks` line. Reads raise,
+  full stop; the second-pass claim is re-confirmed.
+- Gettext's `@@plural_keys` and the Simple backend's MUTEX
+  constant (still guarding main-only `store_translations`
+  writes) remain, consistent with the PR's declared "most of
+  what Rails needs" scope.
+
+### What this means for audition (third pass)
+
+- Four checks confirmed against a conversion written by the
+  people who set the patterns: mutable-constants (including the
+  Regexp.union freeze the PR lost), Hash-default-proc,
+  class-variables, and the class-level-state error on lazy `||=`
+  memos that survive a class-variable conversion.
+- The adoption gap is now concrete: a gem following the blessed
+  ractorize idiom still audits statically not_ready, because the
+  safety lives in an opt-in file. Idea for later: detect a
+  shipped `lib/<gem>/ractorize.rb` and say so in the report, or
+  offer a probe mode that requires it first. A design question,
+  not implemented.
+- The `defined?(Ractor)` class-variable fallback branch is a
+  legitimate pragma site; the dynamic probe already clears it.

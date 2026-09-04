@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+- Fix knowledge base: third pass, the gem dialect. i18n PR 741
+  (the first full gem conversion out of the Rails ractorization
+  effort) read in full and distilled into three new patterns in
+  docs/rails_core_best_practices.md: config class variables
+  moving to singleton-class ivars behind delegators, the opt-in
+  `<gem>/ractorize` entry point, and frozen caches degrading to
+  recompute-per-call. audition was run on both sides of the PR
+  to verify its checks against the conversion; it confirmed the
+  fixes, caught a `.freeze` lost in a rebase and a class
+  variable read that still raises from workers (reproduced on
+  Ruby 4.0.6), and the class-variable semantics claim in the
+  checks' advice was re-verified: reads raise even for
+  shareable values.
 - CI-ready. `--exit-zero` (alias for the new `--fail-on never`,
   also accepted in `.audition.yml`) reports every finding but
   always exits 0, the adoption mode other linters ship under the
