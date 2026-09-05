@@ -27,10 +27,12 @@ module Audition
                "variables; reads and writes alike raise " \
                "Ractor::IsolationError from a non-main Ractor, " \
                "whatever the value holds.",
-          fix: "Rails itself migrated these to class_attribute " \
-               "(a class-level ivar whose frozen value any " \
-               "Ractor may read) or to a module ivar behind a " \
-               "reader; give it a frozen default and rebuild " \
+          fix: "Move the state to class_attribute (a " \
+               "class-level ivar whose frozen value any Ractor " \
+               "may read) or, for plain settings, to " \
+               "singleton_class.attr_accessor plus " \
+               "delegate(..., to: TheModule) for the instance " \
+               "readers; give it a frozen default and rebuild " \
                "and refreeze on write, at boot on the main " \
                "Ractor."
 
@@ -110,8 +112,7 @@ module Audition
                "unless the block was made shareable first.",
           fix: "Pass a shareable lambda instead of a block: " \
                "define_method(:x, Ractor.shareable_lambda " \
-               "{ ... }), as Rails did for its date selectors " \
-               "and url helpers. Captured locals must be " \
+               "{ ... }). Captured locals must be " \
                "shareable (strings become symbols) and assigned " \
                "before the lambda is created, and super is " \
                "unavailable. When the captures are literals, " \

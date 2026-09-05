@@ -47,6 +47,12 @@
   below the new rules flag all fourteen sites the PRs fixed and
   none after; on current rails/rails they find sixteen more that
   no PR has touched.
+- Advice text stands on Ruby semantics: the class-variable macro
+  advice names the singleton-ivar-plus-delegate conversion next
+  to class_attribute, the runtime-require advice names the
+  class-level macro as the boot-time scope for an optional
+  dependency, and no advice cites Rails as the reason for a
+  recipe or carries a commit id.
 - Fix knowledge base: third pass, the gem dialect. i18n PR 741
   (the first full gem conversion out of the Rails ractorization
   effort) read in full and distilled into three new patterns in

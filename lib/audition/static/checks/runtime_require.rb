@@ -22,7 +22,10 @@ module Audition
                "load-time side effects run at an arbitrary " \
                "point.",
           fix: "Require eagerly at boot, before Ractors are " \
-               "spawned."
+               "spawned. For an optional dependency, the " \
+               "class-level macro that enables the feature is " \
+               "a boot-time scope; the request-time method is " \
+               "not."
 
         explain :autoload,
           severity: :warning,

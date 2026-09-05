@@ -34,7 +34,7 @@ module Audition
         "per-subclass values compute in the inherited hook " \
         "(guard on subclass.name for anonymous classes). For " \
         "collections, rebuild and refreeze on write, " \
-        "Rails-style copy-on-write: self.list = " \
+        "copy-on-write: self.list = " \
         "(list + [item]).freeze; never mutate in place. As a " \
         "last resort use Ractor.store_if_absent for " \
         "per-Ractor state, or read the ivar first and proxy " \
@@ -43,9 +43,7 @@ module Audition
         "Every write memoizes a shareable (frozen) value, so " \
         "non-main Ractors can read it once it has been " \
         "computed; only the first write must happen on the " \
-        "main Ractor, or it raises Ractor::IsolationError. " \
-        "This is the pattern Rails core uses for its own " \
-        "memoized class state."
+        "main Ractor, or it raises Ractor::IsolationError."
       FROZEN_MEMO_FIX =
         "Warm the cache at boot, before spawning Ractors: call " \
         "the memoizing method from an initializer, an on_load " \
@@ -188,7 +186,7 @@ module Audition
         )
       end
 
-      # Frozen memoization, the shape Rails core ships: every
+      # Frozen memoization: every
       # write to the ivar is a memo site (`@x ||=` or a defined?
       # guard) whose value is provably shareable, either a frozen
       # literal, an explicit `.freeze` or make_shareable call.

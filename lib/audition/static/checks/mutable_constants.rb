@@ -76,8 +76,7 @@ module Audition
           fix: "Use Ractor::Port for cross-Ractor " \
                "coordination; keep a per-Ractor primitive " \
                "via Ractor.store_if_absent when the state it " \
-               "guards is per-Ractor too (Rails moved its " \
-               "template digest mutex this way); or use " \
+               "guards is per-Ractor too; or use " \
                "Ractor-safe structures (ractor_safe, ratomic " \
                "gems)."
 
@@ -99,8 +98,7 @@ module Audition
                "Hash, and freezing the Hash does not make " \
                "the block shareable; a non-main Ractor " \
                "reading this constant raises " \
-               "Ractor::IsolationError. Rails removed this " \
-               "pattern twice during its ractorization.",
+               "Ractor::IsolationError.",
           fix: "Use a plain frozen Hash with explicit keys, " \
                "or drop the default proc and fetch with a " \
                "literal default: hash.fetch(key, [])."
@@ -116,8 +114,8 @@ module Audition
           fix: "Build the complete value at load time and " \
                "freeze it (each_with_object then .freeze), " \
                "or move the registry behind a writer that " \
-               "rebuilds and refreezes on each change, the " \
-               "copy-on-write style Rails registries use. A " \
+               "rebuilds and refreezes on each change " \
+               "(copy-on-write). A " \
                "registry that plugins extend during boot is " \
                "frozen in the last boot hook (after_initialize) " \
                "rather than at definition, and writes after the " \

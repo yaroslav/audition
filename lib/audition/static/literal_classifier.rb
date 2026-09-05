@@ -36,8 +36,8 @@ module Audition
 
       # Calls returning a fresh, unfrozen String or Regexp;
       # `# frozen_string_literal: true` covers literals only.
-      # Rails hit both shapes (`.tr` and `Regexp.new`) in
-      # constants during its ractorization. These names belong
+      # Both shapes (`.tr` and `Regexp.new`) turn up in
+      # constants in the wild. These names belong
       # to String alone in core, so any receiver qualifies.
       STRING_ONLY_METHODS = %i[
         tr tr_s gsub sub squeeze strip lstrip rstrip chomp chop

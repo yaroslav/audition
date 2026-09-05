@@ -190,9 +190,9 @@ module Audition
     #   @x ||= expr
     #   return @x if defined?(@x); @x = expr
     #
-    # Preferred strategy is freeze-on-memoize, the pattern Rails
-    # core applies to its own code: the memoization stays exactly
-    # as written and only the memoized value becomes shareable
+    # Preferred strategy is freeze-on-memoize: the memoization
+    # stays exactly as written and only the memoized value
+    # becomes shareable
     # (`.freeze` appended; Ractor.make_shareable for containers).
     # Non-main Ractors may then read the ivar once it has been
     # computed; the first write must still happen on the main
@@ -325,7 +325,7 @@ module Audition
       end
 
       # Config setters (`def self.backend=(value); @backend =
-      # value; end`) get the Rails try_make_shareable recipe in
+      # value; end`) get a try-make-shareable recipe in
       # plain Ruby: shareable values are deeply frozen so reads
       # from any Ractor become legal, unshareable values keep
       # today's behavior through the rescue. Only bare local reads
