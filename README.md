@@ -311,6 +311,15 @@ Static, with file:line precision:
   `class_attribute` migration Rails itself made) and
   `class_attribute` without copy-on-write writes,
   `include Singleton`, `fork`, `ObjectSpace._id2ref`, ENV mutation.
+- **Native extensions that never declare Ractor safety**: a byte
+  scan of every compiled `.bundle`/`.so` for the
+  `rb_ext_ractor_safe` import, which also covers precompiled
+  platform gems that ship no sources; an unbuilt checkout is
+  scanned at the source level (`ext/**`, C, Rust, or Zig) instead.
+  A silent extension raises `Ractor::UnsafeError` on every call
+  from a non-main Ractor, so it rates a warning; a declared one
+  gets an info note, because the declaration is the maintainer's
+  assertion, not a proof.
 
 Dynamic, on the live object graph:
 
@@ -320,6 +329,11 @@ Dynamic, on the live object graph:
   `Ractor.shareable?`, and inspects every class and module for
   class-level ivars and class variables, with
   `const_source_location` attribution.
+- Records every compiled extension the load pulled in,
+  dependencies included, and byte-scans each for the
+  `rb_ext_ractor_safe` import; silent ones are reported against
+  the dependency that ships them. Ruby's own extensions are left
+  to Ruby.
 - Boots `config.ru` and serves one GET / entirely inside a Ractor,
   the per-worker model of Ractor web servers; then hammers it from
   4 Ractors x 25 requests to surface failures that only appear

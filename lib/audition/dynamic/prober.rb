@@ -38,7 +38,10 @@ module Audition
 
       # Runs the probe described by a {Target#entry} hash.
       #
-      # @param entry [Hash] `:mode` plus mode-specific keys
+      # @param entry [Hash] `:mode` plus mode-specific keys; require
+      #   and rails entries may carry `:compiled_files`, the target's
+      #   own compiled extensions, which the static check already
+      #   covers and the probe therefore does not report again
       # @return [Result]
       # @raise [Audition::Error] on an unknown mode
       def probe(entry)
@@ -104,7 +107,8 @@ module Audition
         raw = run("require",
           "feature" => feature,
           "load_paths" => Array(entry[:load_paths]),
-          "root" => entry[:root])
+          "root" => entry[:root],
+          "known_compiled" => Array(entry[:compiled_files]))
         findings = runtime_findings(raw, feature)
         Result.new(mode: :require, raw: raw, findings: findings,
           passed: own_clean?(findings))
@@ -113,7 +117,8 @@ module Audition
       def probe_rails(entry)
         raw = run("rails",
           "environment" => entry[:environment],
-          "root" => entry[:root])
+          "root" => entry[:root],
+          "known_compiled" => Array(entry[:compiled_files]))
         boot = raw["boot"]
         if boot && !boot["ok"]
           finding = Finding.new(
@@ -198,7 +203,43 @@ module Audition
                  "or Ractor-local storage."
           )
         end
+        raw.fetch("native_extensions", []).each do |entry|
+          next if entry["ruby"] || entry["known"]
+
+          findings << native_finding(entry, label)
+        end
         findings
+      end
+
+      # Ruby's own extensions are left to Ruby, and files the static
+      # check already reported are not repeated; what remains is the
+      # native code the target pulls in through its dependencies.
+      def native_finding(entry, label)
+        name = File.basename(entry["path"])
+        native = Static::NativeExtensions
+        if entry["declares"]
+          runtime_finding(
+            entry, label,
+            check: "runtime-native-extension",
+            severity: :info,
+            message: "compiled extension #{name} declares Ractor " \
+                     "safety (imports #{native::SYMBOL})",
+            why: "#{native::DECLARED_WHY} Loaded while requiring " \
+                 "the target.",
+            fix: native::DECLARED_FIX
+          )
+        else
+          runtime_finding(
+            entry, label,
+            check: "runtime-native-extension",
+            severity: :warning,
+            message: "compiled extension #{name} does not declare " \
+                     "Ractor safety",
+            why: "#{native::SILENT_WHY}#{native::COMPILED_TAIL} " \
+                 "Loaded while requiring the target.",
+            fix: native::SILENT_FIX
+          )
+        end
       end
 
       # Class-level state holding only shareable values is the

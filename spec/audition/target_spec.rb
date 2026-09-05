@@ -168,4 +168,48 @@ RSpec.describe Audition::Target do
       end
     end
   end
+  it "collects compiled extension files, skipping excluded dirs" do
+    in_tmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib/cool_gem"))
+      FileUtils.mkdir_p(File.join(dir, "vendor/bundle/x"))
+      FileUtils.mkdir_p(File.join(dir, "tmp/x"))
+      File.write(File.join(dir, "cool_gem.gemspec"), "")
+      File.write(File.join(dir, "lib/cool_gem.rb"), "module CoolGem;end\n")
+      bundle = File.join(dir, "lib/cool_gem/cool_gem.bundle")
+      File.binwrite(bundle, "\0")
+      File.binwrite(File.join(dir, "vendor/bundle/x/dep.so"), "\0")
+      File.binwrite(File.join(dir, "tmp/x/build.bundle"), "\0")
+
+      target = described_class.detect(dir)
+      expect(target.compiled_files).to eq([bundle])
+    end
+  end
+
+  it "finds the compiled files of an installed gem by name" do
+    target = described_class.detect("rubydex")
+
+    expect(target.compiled_files).not_to be_empty
+    expect(target.compiled_files).to all(match(/\.(bundle|so)\z/))
+  end
+
+  it "gives scripts no compiled files" do
+    in_tmpdir do |dir|
+      path = File.join(dir, "worker.rb")
+      File.write(path, "puts 1\n")
+
+      expect(described_class.detect(path).compiled_files).to eq([])
+    end
+  end
+  it "ignores debug-symbol copies inside .dSYM bundles" do
+    in_tmpdir do |dir|
+      dwarf = File.join(dir, "lib/x.bundle.dSYM/Contents/Resources/DWARF")
+      FileUtils.mkdir_p(dwarf)
+      File.write(File.join(dir, "x.gemspec"), "")
+      bundle = File.join(dir, "lib/x.bundle")
+      File.binwrite(bundle, "\0")
+      File.binwrite(File.join(dwarf, "x.bundle"), "\0")
+
+      expect(described_class.detect(dir).compiled_files).to eq([bundle])
+    end
+  end
 end

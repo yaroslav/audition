@@ -53,7 +53,8 @@ RSpec.describe Audition::BundleSweep do
       FileUtils.mkdir_p(File.join(gem_root, "lib"))
       File.write(File.join(gem_root, "lib", "bad.rb"), "$x = 1\n")
       spec = instance_double(Gem::Specification,
-        name: "mygem", gem_dir: gem_root, require_paths: ["lib"])
+        name: "mygem", gem_dir: gem_root, require_paths: ["lib"],
+        full_require_paths: [File.join(gem_root, "lib")])
       allow(Gem::Specification).to receive(:find_by_name)
         .with("mygem", "1.2.3").and_return(spec)
 
@@ -88,7 +89,8 @@ RSpec.describe Audition::BundleSweep do
             - mutable-constants
       YAML
       spec = instance_double(Gem::Specification,
-        name: "mygem", gem_dir: gem_root, require_paths: ["lib"])
+        name: "mygem", gem_dir: gem_root, require_paths: ["lib"],
+        full_require_paths: [File.join(gem_root, "lib")])
       allow(Gem::Specification).to receive(:find_by_name)
         .with("mygem", "1.2.3").and_return(spec)
 

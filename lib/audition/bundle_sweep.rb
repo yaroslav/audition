@@ -115,7 +115,8 @@ module Audition
         ruby_files: spec.require_paths.flat_map do |rp|
           ruby_files_under(File.join(root, rp))
         end,
-        entry: {mode: :require, feature: spec.name, root: root}
+        entry: {mode: :require, feature: spec.name, root: root},
+        compiled_files: Target.compiled_for(spec)
       )
     end
 
@@ -142,16 +143,23 @@ module Audition
       files = target.ruby_files.reject do |file|
         config.excluded?(file.delete_prefix("#{target.root}/"))
       end
+      compiled = target.compiled_files.reject do |file|
+        config.excluded?(file.delete_prefix("#{target.root}/"))
+      end
       per_file = Static::Analyzer.new
         .analyze_paths(files, workers: 1)
-      per_file + Static::GraphAudit.new.analyze_paths(files)
+      per_file + Static::GraphAudit.new.analyze_paths(files) +
+        Static::NativeExtensions.new.analyze(target,
+          compiled_files: compiled)
     end
 
     def dynamic_results(target)
       return [] if @static_only || target.entry.nil?
 
       prober = Dynamic::Prober.new(timeout: @timeout)
-      [prober.probe(target.entry)]
+      [prober.probe(
+        target.entry.merge(compiled_files: target.compiled_files)
+      )]
     end
   end
 end

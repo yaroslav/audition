@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "rbconfig"
 require "tmpdir"
 
 RSpec.describe Audition::Dynamic::Prober do
@@ -155,6 +156,26 @@ RSpec.describe Audition::Dynamic::Prober do
         expect(messages.grep(/@cache/)).not_to be_empty
         expect(messages.grep(/@@legacy/)).not_to be_empty
         expect(messages.grep(/SAFE/)).to be_empty
+      end
+    end
+
+    it "falls back to the single top-level lib file of the target" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/active_thing.rb", <<~RUBY)
+          module ActiveThing
+            VERSION = "1.0"
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "activething",
+          load_paths: [File.join(dir, "lib")],
+          root: dir
+        )
+
+        expect(result.raw["error"]).to be_nil
+        expect(result.passed).to be(true)
       end
     end
 
@@ -338,6 +359,130 @@ RSpec.describe Audition::Dynamic::Prober do
       )
       expect(caps.fetch("ENV read")).to include("ok" => true)
       expect(caps.fetch("require inside Ractor")).to include("ok" => true)
+    end
+  end
+  describe "native extension reporting" do
+    # A real silent extension, copied out of Ruby's own arch dir into
+    # an excluded (vendor) tree so it counts as a dependency rather
+    # than as Ruby itself. Ruby derives Init_ripper from the basename,
+    # so the name must survive the copy.
+    def vendor_silent_ext(dir)
+      ext = RbConfig::CONFIG["DLEXT"]
+      src = File.join(RbConfig::CONFIG["archdir"], "ripper.#{ext}")
+      dest = File.join(dir, "vendor/ripper_gem/lib/vendored/ripper.#{ext}")
+      FileUtils.mkdir_p(File.dirname(dest))
+      FileUtils.cp(src, dest)
+      dest
+    end
+
+    def native(result)
+      result.findings.select { |f| f.check == "runtime-native-extension" }
+    end
+
+    it "warns about a dependency's silent compiled extension" do
+      Dir.mktmpdir do |dir|
+        copy = vendor_silent_ext(dir)
+        write(dir, "lib/needs_ripper.rb", <<~RUBY)
+          require "vendored/ripper"
+          module NeedsRipper
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "needs_ripper",
+          load_paths: [File.join(dir, "lib"),
+            File.join(dir, "vendor/ripper_gem/lib")],
+          root: dir
+        )
+
+        finding = native(result).first
+        expect(finding).not_to be_nil
+        expect(finding.path).to eq(File.realpath(copy))
+        expect(finding.severity).to eq(:warning)
+        expect(finding.dependency?).to be(true)
+        expect(finding.line).to be_nil
+        expect(finding.message).to include("does not declare Ractor safety")
+        expect(result.raw["native_extensions"]).to include(
+          a_hash_including("path" => finding.path, "declares" => false,
+            "ruby" => false)
+        )
+      end
+    end
+
+    it "notes a dependency's declared compiled extension" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/needs_rubydex.rb", <<~RUBY)
+          require "rubydex"
+          module NeedsRubydex
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "needs_rubydex",
+          load_paths: [File.join(dir, "lib")],
+          root: dir
+        )
+
+        finding = native(result).find do |f|
+          f.path.match?(/rubydex\.(bundle|so)\z/)
+        end
+        expect(finding).not_to be_nil
+        expect(finding.severity).to eq(:info)
+        expect(finding.dependency?).to be(true)
+        expect(finding.message).to include("declares Ractor safety")
+      end
+    end
+
+    it "records Ruby's own extensions without reporting them" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/needs_ripper.rb", <<~RUBY)
+          require "ripper"
+          module NeedsRipper
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "needs_ripper",
+          load_paths: [File.join(dir, "lib")],
+          root: dir
+        )
+
+        recorded = result.raw["native_extensions"].find do |e|
+          e["path"].match?(/ripper\.(bundle|so)\z/)
+        end
+        expect(recorded).to include("ruby" => true, "declares" => false)
+        expect(native(result)).to eq([])
+      end
+    end
+
+    it "skips compiled files the static check already covers" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/needs_rubydex.rb", <<~RUBY)
+          require "rubydex"
+          module NeedsRubydex
+          end
+        RUBY
+        spec = Gem::Specification.find_by_name("rubydex")
+        known = spec.full_require_paths.flat_map do |rp|
+          Dir[File.join(rp, "**", "*.{bundle,so}")]
+        end
+
+        result = prober.probe(
+          mode: :require,
+          feature: "needs_rubydex",
+          load_paths: [File.join(dir, "lib")],
+          root: dir,
+          compiled_files: known
+        )
+
+        expect(native(result)).to eq([])
+        expect(result.raw["native_extensions"]).to include(
+          a_hash_including("known" => true, "own" => true)
+        )
+      end
     end
   end
 end

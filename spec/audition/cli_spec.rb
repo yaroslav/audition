@@ -579,4 +579,20 @@ RSpec.describe Audition::CLI do
       expect(strict_status).to eq(1)
     end
   end
+  it "warns about a silent compiled extension and rates it risky" do
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "lib/cool_gem"))
+      File.write(File.join(dir, "cool_gem.gemspec"), "")
+      File.write(File.join(dir, "lib/cool_gem.rb"), "module CoolGem;end\n")
+      File.binwrite(File.join(dir, "lib/cool_gem/cool_gem.bundle"),
+        "\0_rb_define_method\0")
+
+      status, out, = run(dir, "--static-only", "--plain")
+
+      expect(status).to eq(0)
+      expect(out).to include("cool_gem.bundle")
+      expect(out).to include("does not declare Ractor safety")
+      expect(out).to include("risky")
+    end
+  end
 end

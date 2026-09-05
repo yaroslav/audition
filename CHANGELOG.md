@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+- Native extensions. `audition .` in a gem checkout, `audition
+  <gem>` on an installed gem, app targets, and bundle sweeps now
+  report every compiled extension (`.bundle`/`.so`) that never
+  declares Ractor safety, as a warning: every method such an
+  extension defines raises `Ractor::UnsafeError` on the first
+  call from a non-main Ractor, C, Rust, and Zig alike (verified
+  on Ruby 4.0.6). The static check (`native-extension`) is a
+  byte scan for the `rb_ext_ractor_safe` import, so it covers
+  precompiled platform gems that ship no sources; an unbuilt
+  checkout is scanned at the source level instead (`ext/**` in
+  C, Rust, or Zig), anchored at the declaration or at `Init_*`,
+  where it belongs, and harness trees (fuzz, benches, tests)
+  are ignored. The require and Rails probes extend it to
+  dependencies (`runtime-native-extension`): the harness records
+  every compiled file the load pulled in and byte-scans those
+  too, attributing them to the dependency; Ruby's own archdir
+  extensions are left to Ruby, and files the static check
+  already reported are not repeated. Declared extensions get an
+  info note, since the declaration is the maintainer's
+  assertion, not a proof. Cargo and Zig build output and
+  `.dSYM` copies are skipped.
+- The require probe finds squashed entry files. `audition
+  activesupport` used to fail its dynamic probe with "cannot load
+  such file": the gem's entry is `active_support`, and no rule
+  inverts that spelling. When the target ships exactly one
+  top-level file under `lib/`, the probe now requires it after
+  the name and its slashed form fail, and reports the last error
+  seen rather than the first.
 - Fix knowledge base: third pass, the gem dialect. i18n PR 741
   (the first full gem conversion out of the Rails ractorization
   effort) read in full and distilled into three new patterns in

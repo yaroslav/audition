@@ -12,6 +12,14 @@ module Audition
       vendor node_modules tmp log coverage pkg .git .bundle
     ].freeze
 
+    # Cargo and Zig build output: full of .so/.dylib artifacts that
+    # are not the extension `require` loads.
+    BUILD_DIRS = %w[target zig-out].freeze
+
+    # What Ruby loads as a native extension (RbConfig DLEXT is
+    # "bundle" on macOS, "so" everywhere else, Windows included).
+    COMPILED = "*.{bundle,so}"
+
     # @return [Symbol] one of `:script`, `:gem`, `:rack`, `:rails`,
     #   `:directory`, `:bundle`
     attr_reader :type
@@ -21,6 +29,10 @@ module Audition
 
     # @return [Array<String>] Ruby files to scan statically
     attr_reader :ruby_files
+
+    # @return [Array<String>] compiled extension files (.bundle/.so)
+    #   shipped with the target; empty for scripts and file lists
+    attr_reader :compiled_files
 
     # @return [Hash, nil] dynamic probe entry (`:mode` plus
     #   mode-specific keys), nil for static-only targets
@@ -104,7 +116,8 @@ module Audition
           type: :directory,
           root: dir,
           ruby_files: glob(dir),
-          entry: nil
+          entry: nil,
+          compiled_files: compiled(dir)
         )
       end
     end
@@ -118,7 +131,8 @@ module Audition
           glob(File.join(spec.full_gem_path, rp))
         end,
         entry: {mode: :require, feature: name,
-                root: spec.full_gem_path}
+                root: spec.full_gem_path},
+        compiled_files: compiled_for(spec)
       )
     rescue Gem::MissingSpecError
       raise Error,
@@ -136,7 +150,8 @@ module Audition
           mode: :rails,
           environment: File.join(dir, "config", "environment.rb"),
           root: dir
-        }
+        },
+        compiled_files: compiled(dir)
       )
     end
 
@@ -145,7 +160,8 @@ module Audition
         type: :rack,
         root: dir,
         ruby_files: [config_ru] + glob(dir),
-        entry: {mode: :rack, config_ru: config_ru}
+        entry: {mode: :rack, config_ru: config_ru},
+        compiled_files: compiled(dir)
       )
     end
 
@@ -160,7 +176,8 @@ module Audition
           feature: File.basename(gemspec, ".gemspec"),
           load_paths: [lib],
           root: dir
-        }
+        },
+        compiled_files: compiled(dir)
       )
     end
 
@@ -173,24 +190,47 @@ module Audition
       raw.sub(%r{/+\z}, "")
     end
 
-    def self.glob(dir)
+    def self.glob(dir, pattern = "*.rb", skip: EXCLUDED_DIRS)
       dir = normalize(dir)
-      Dir[File.join(dir, "**", "*.rb")].reject do |path|
+      Dir[File.join(dir, "**", pattern)].reject do |path|
         relative = path.delete_prefix("#{dir}/")
         parts = relative.split("/")
-        parts.any? { |p| EXCLUDED_DIRS.include?(p) || p.start_with?(".") }
+        parts.any? { |p| skip.include?(p) || p.start_with?(".") }
       end.sort
+    end
+
+    # macOS debug-symbol bundles (x.bundle.dSYM/...) carry a file
+    # with the extension's name that nothing ever loads.
+    def self.compiled(dir)
+      glob(dir, COMPILED, skip: EXCLUDED_DIRS + BUILD_DIRS).reject do |p|
+        p.split("/").any? { |part| part.end_with?(".dSYM") }
+      end
+    end
+
+    # Compiled extension files of an installed gem. RubyGems builds
+    # a source gem into its extension dir and also copies the result
+    # under lib/, so the same file shows up on two require paths;
+    # keep one per require-relative name.
+    #
+    # @param spec [Gem::Specification]
+    # @return [Array<String>]
+    def self.compiled_for(spec)
+      spec.full_require_paths.flat_map do |rp|
+        compiled(rp).map { |path| [path.delete_prefix("#{rp}/"), path] }
+      end.uniq(&:first).map(&:last)
     end
 
     private_class_method :from_file, :from_directory, :from_gem_name,
       :rails_target, :rack_target, :gem_dir_target,
-      :glob, :normalize
+      :glob, :compiled, :normalize
 
-    def initialize(type:, root:, ruby_files:, entry:)
+    def initialize(type:, root:, ruby_files:, entry:,
+      compiled_files: [])
       @type = type
       @root = root
       @ruby_files = ruby_files
       @entry = entry
+      @compiled_files = compiled_files
     end
   end
 end

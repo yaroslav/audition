@@ -89,33 +89,45 @@ call the memoizing methods once at boot, before spawning
 Ractors; the end of the gem's main file or an on_load hook is
 the natural place.
 
-## Native extensions (C and Rust)
+## Native extensions (C, Rust, and Zig)
 
-audition reads Ruby only; it cannot see native code.
-Ractor::UnsafeError ("ractor unsafe method called from not
-main ractor") is not an IsolationError: it means a compiled
-extension never declared rb_ext_ractor_safe, so every method
-it defines raises on first call from a non-main Ractor. The
-library probe requires the gem and sweeps constants without
-calling methods, so a gem with unsafe native methods can
-still audit as ready. Script and Rack probes execute real
-code inside a Ractor, so they do surface it when the code
-path reaches the extension.
+audition cannot read native code, but it reports the one
+fact that decides its Ractor behavior. Ractor::UnsafeError
+("ractor unsafe method called from not main ractor") is not
+an IsolationError: it means a compiled extension never
+declared rb_ext_ractor_safe, so every method it defines
+raises on first call from a non-main Ractor, whether the
+extension is C, Rust, or Zig. The `native-extension` check
+byte-scans every compiled file in the target (*.bundle on
+macOS, *.so elsewhere) for that import and warns when it is
+missing; an unbuilt checkout is scanned at the source level
+(ext/**) instead. A declared extension gets an info note: the
+declaration is the maintainer's assertion, not a proof, and
+only real calls from a Ractor (script and Rack probes, or the
+gem's own tests under Ractor.new) verify it.
 
-Before trusting ready on a gem that ships compiled files
-(*.bundle on macOS, *.so on Linux), check the binary. An
-extension that declares safety calls rb_ext_ractor_safe, and
-that call is imported from libruby, so the symbol is visible
-without sources:
+The require and Rails probes extend it to dependencies: the
+harness records every compiled file the load pulled in and
+byte-scans those too, reporting silent ones as
+`runtime-native-extension` warnings attributed to the
+dependency. Three things still hide: extensions loaded
+lazily on a code path the probe never runs, Ruby's own
+archdir extensions (left to Ruby: ripper and coverage raise
+from Ractors, encoding and digest plug-ins define no
+methods), and whatever a Rack app loads (the Rack probe
+exercises real calls instead, so an UnsafeError shows up as
+a boot or call failure). For those, check the binary the
+same way:
 
     nm -u ext.bundle | grep rb_ext_ractor_safe    # macOS
     nm -D -u ext.so | grep rb_ext_ractor_safe     # Linux
 
 A match means the extension declares Ractor safety; silence
-means its methods raise from Ractors. Check every compiled
-file the gem ships. For silent extensions: keep those calls
-on the main Ractor, try a newer release, or ask upstream to
-audit the C code and declare rb_ext_ractor_safe(true).
+means its methods raise from Ractors. For silent extensions:
+keep those calls on the main Ractor, try a newer release, or
+ask upstream to audit the native code for process-global
+state and declare rb_ext_ractor_safe(true) (from Rust:
+rb_sys::rb_ext_ractor_safe(true)) first thing in Init_*.
 
 ## What the fixer refuses (human work)
 
@@ -143,5 +155,6 @@ https://github.com/yaroslav/audition/blob/main/docs/rails_core_best_practices.md
   blamed on the fixes.
 - Leaving accepted findings as prose instead of encoding them
   with pragmas, config, or the baseline.
-- Declaring a gem with compiled extensions ready without the
-  nm check: audition cannot see native code.
+- Reading a `native-extension` info note as proof of safety:
+  the byte scan says declared or silent, never safe; only real
+  calls from a Ractor verify the declaration.

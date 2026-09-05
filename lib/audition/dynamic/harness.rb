@@ -12,6 +12,7 @@ Warning[:experimental] = false
 Thread.report_on_exception = false
 
 require "json"
+require "rbconfig"
 
 module AuditionHarness
   MAX_CONSTS = 5000
@@ -137,18 +138,41 @@ module AuditionHarness
       $LOAD_PATH.unshift(lp) # audition:disable global-variables
     end
     before = Object.constants
-    feature = payload.fetch("feature")
-    begin
-      require feature # audition:disable runtime-require
-    rescue LoadError
-      # Dashed gem names conventionally ship slashed entry files
-      # (rspec-mocks provides rspec/mocks).
-      slashed = feature.tr("-", "/")
-      raise if slashed == feature
+    features = $LOADED_FEATURES.dup # audition:disable global-variables
+    require_target(payload.fetch("feature"), payload["root"])
+    scan(Object.constants - before, root: payload["root"]).merge(
+      "native_extensions" => native_extensions(
+        features, payload["root"], payload["known_compiled"]
+      )
+    )
+  end
 
-      require slashed # audition:disable runtime-require
+  # Gem names and entry files diverge in two conventional ways:
+  # dashed names ship slashed files (rspec-mocks provides
+  # rspec/mocks), and squashed names ship snake_case files
+  # (activesupport provides active_support). The second has no
+  # rule to invert, so when the target ships exactly one top-level
+  # file under lib/, that file is the entry. The error reported is
+  # the last one seen: a candidate that loads but fails inside says
+  # more than "cannot load such file".
+  def require_target(feature, root)
+    require feature # audition:disable runtime-require
+  rescue LoadError => error
+    entry_candidates(feature, root).each do |candidate|
+      return require candidate # audition:disable runtime-require
+    rescue LoadError => e
+      error = e
     end
-    scan(Object.constants - before, root: payload["root"])
+    raise error
+  end
+
+  def entry_candidates(feature, root)
+    candidates = []
+    slashed = feature.tr("-", "/")
+    candidates << slashed if slashed != feature
+    files = root ? Dir[File.join(root, "lib", "*.rb")] : []
+    candidates << files.first.delete_suffix(".rb") if files.size == 1
+    candidates
   end
 
   # Breadth-first walk of every constant the require introduced:
@@ -160,13 +184,7 @@ module AuditionHarness
     # Loaded features are realpathed by require; the target root
     # must be too, or symlinked paths (macOS /var vs /private/var)
     # break the own-vs-dependency comparison.
-    if root
-      root = begin
-        File.realpath(root)
-      rescue
-        root
-      end
-    end
+    root = realpath(root)
     unshareable = []
     class_state = []
     class_vars = []
@@ -243,6 +261,49 @@ module AuditionHarness
     relative.split(File::SEPARATOR).any? do |part|
       EXCLUDED_DIRS.include?(part) || part.start_with?(".")
     end
+  end
+
+  NATIVE = /\.(bundle|so)\z/
+  DECLARATION = "rb_ext_ractor_safe"
+
+  # Compiled extensions the require pulled in, with the one fact
+  # that decides their Ractor behavior: whether the file imports
+  # rb_ext_ractor_safe. Ruby's own extensions (archdir) are flagged
+  # so the prober can leave them to Ruby, and files the static check
+  # already covers are flagged as known.
+  def native_extensions(before, root, known)
+    root = realpath(root)
+    known = Array(known).map { |path| realpath(path) }
+    archdir = RbConfig::CONFIG["archdir"] + File::SEPARATOR
+    loaded = $LOADED_FEATURES - before # audition:disable global-variables
+    loaded.grep(NATIVE).map do |path|
+      {"path" => path,
+       "declares" => declares?(path),
+       "ruby" => path.start_with?(archdir),
+       "known" => known.include?(path),
+       "own" => known.include?(path) || own_path?(path, root)}
+    end
+  end
+
+  def declares?(path)
+    File.binread(path).include?(DECLARATION)
+  rescue SystemCallError
+    false
+  end
+
+  def own_path?(path, root)
+    return false unless root
+
+    path == root ||
+      (path.start_with?(root + File::SEPARATOR) && !excluded?(path, root))
+  end
+
+  def realpath(path)
+    return path if path.nil?
+
+    File.realpath(path)
+  rescue SystemCallError
+    path
   end
 
   def inspect_module(full, mod, origin, class_state, class_vars)
@@ -383,6 +444,7 @@ module AuditionHarness
   def rails(payload)
     environment = payload.fetch("environment")
     before = Object.constants
+    features = $LOADED_FEATURES.dup # audition:disable global-variables
     started = Time.now
     require environment # audition:disable runtime-require
     begin
@@ -392,8 +454,12 @@ module AuditionHarness
     end
     boot = {"ok" => true,
             "seconds" => (Time.now - started).round(1)}
-    scan(Object.constants - before, root: payload["root"])
-      .merge("boot" => boot)
+    scan(Object.constants - before, root: payload["root"]).merge(
+      "boot" => boot,
+      "native_extensions" => native_extensions(
+        features, payload["root"], payload["known_compiled"]
+      )
+    )
   rescue Exception => e
     {"boot" => {"ok" => false, "error" => describe_error(e)}}
   end

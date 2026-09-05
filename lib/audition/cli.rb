@@ -165,7 +165,9 @@ module Audition
 
       results = []
       if target.entry && !options[:static_only]
-        results << prober(options).probe(target.entry)
+        results << prober(options).probe(
+          target.entry.merge(compiled_files: target.compiled_files)
+        )
       end
 
       all = findings +
@@ -277,8 +279,13 @@ module Audition
       files = target.ruby_files.reject do |file|
         config.excluded?(file.delete_prefix("#{target.root}/"))
       end
+      compiled = target.compiled_files.reject do |file|
+        config.excluded?(file.delete_prefix("#{target.root}/"))
+      end
       per_file = Static::Analyzer.new.analyze_paths(files)
-      per_file + Static::GraphAudit.new.analyze_paths(files)
+      per_file + Static::GraphAudit.new.analyze_paths(files) +
+        Static::NativeExtensions.new.analyze(target,
+          compiled_files: compiled)
     end
 
     # Fix chatter goes to stderr: stdout carries the report, which
