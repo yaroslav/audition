@@ -162,6 +162,8 @@ RSpec.describe Audition::Dynamic::Prober do
     it "falls back to the single top-level lib file of the target" do
       Dir.mktmpdir do |dir|
         write(dir, "lib/active_thing.rb", <<~RUBY)
+          # frozen_string_literal: true
+
           module ActiveThing
             VERSION = "1.0"
           end
@@ -176,6 +178,33 @@ RSpec.describe Audition::Dynamic::Prober do
 
         expect(result.raw["error"]).to be_nil
         expect(result.passed).to be(true)
+      end
+    end
+
+    it "attributes constants loaded through the fallback to the target" do
+      # The fallback requires the entry by absolute path, and an
+      # absolute require keeps the path as given, so the candidate
+      # must be built from the realpathed root or a symlinked
+      # tmpdir (macOS /var) turns the target's own findings into
+      # dependency findings.
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/active_thing.rb", <<~RUBY)
+          module ActiveThing
+            LABEL = String.new("mutable")
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "activething",
+          load_paths: [File.join(dir, "lib")],
+          root: dir
+        )
+
+        expect(result.raw["error"]).to be_nil
+        expect(result.passed).to be(false)
+        own = result.findings.reject(&:dependency?)
+        expect(own.map(&:message)).to include(a_string_including("LABEL"))
       end
     end
 

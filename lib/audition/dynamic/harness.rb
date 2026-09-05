@@ -152,9 +152,13 @@ module AuditionHarness
   # rspec/mocks), and squashed names ship snake_case files
   # (activesupport provides active_support). The second has no
   # rule to invert, so when the target ships exactly one top-level
-  # file under lib/, that file is the entry. The error reported is
-  # the last one seen: a candidate that loads but fails inside says
-  # more than "cannot load such file".
+  # file under lib/, that file is the entry, required by absolute
+  # path. An absolute require keeps the path as given, and scan
+  # compares constant origins against the realpathed root, so the
+  # candidate is built from the realpath too (a symlinked tmpdir,
+  # macOS /var, otherwise turns own findings into dependency ones).
+  # The error reported is the last one seen: a candidate that loads
+  # but fails inside says more than "cannot load such file".
   def require_target(feature, root)
     require feature # audition:disable runtime-require
   rescue LoadError => error
@@ -170,7 +174,7 @@ module AuditionHarness
     candidates = []
     slashed = feature.tr("-", "/")
     candidates << slashed if slashed != feature
-    files = root ? Dir[File.join(root, "lib", "*.rb")] : []
+    files = root ? Dir[File.join(realpath(root), "lib", "*.rb")] : []
     candidates << files.first.delete_suffix(".rb") if files.size == 1
     candidates
   end
