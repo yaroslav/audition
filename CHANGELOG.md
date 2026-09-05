@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] - Unreleased
 
 - Native extensions. `audition .` in a gem checkout, `audition
   <gem>` on an installed gem, app targets, and bundle sweeps now
