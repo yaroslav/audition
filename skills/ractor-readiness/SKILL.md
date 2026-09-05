@@ -134,8 +134,8 @@ rb_sys::rb_ext_ractor_safe(true)) first thing in Init_*.
 Registries and accumulators (`@x ||= {}` then mutated),
 constructor singletons (`@instance ||= new`), computed config
 setters, settings DSLs (sinatra-style), sync primitives,
-cross-file-mutated tables. These need the copy-on-write
-redesign Rails core used; recipes with real commits, including
+cross-file-mutated tables. These need a copy-on-write redesign;
+the pattern study has worked recipes for it, including
 the frozen private constant for configuration-free memos,
 freezing value objects at the end of initialize, and the
 snapshot-and-rehydrate protocol for lock-bearing singletons:

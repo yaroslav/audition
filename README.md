@@ -52,10 +52,10 @@ core itself is being ractorized; see the
   files) and on every push (a full self-audit in CI).
 - **Trained on Rails core.** Several checks and fix suggestions
   come straight from studying the Rails ractorization effort
-  (about 75 substantive commits): `Hash.new` default procs,
-  in-place mutation of registry constants, closure-carrying
-  `define_method`, copy-on-write rewrites. The findings are
-  documented in
+  (some two hundred commits and pull requests): `Hash.new`
+  default procs, in-place mutation of registry constants,
+  closure-carrying `define_method`, copy-on-write rewrites. The
+  findings are documented in
   [docs/rails_core_best_practices.md](docs/rails_core_best_practices.md).
 - **Terminal-native output.** Colors, glyphs, and OSC 8 hyperlinks;
   `path:line` is clickable in supporting terminals. JSON output for

@@ -606,3 +606,300 @@ upstream:
   not implemented.
 - The `defined?(Ractor)` class-variable fallback branch is a
   legitimate pragma site; the dynamic probe already clears it.
+
+## Fourth pass: what the label knew and the grep did not
+
+Studied 2026-09-05. The first two passes selected commits by
+`git log --grep=ractor` plus a `Ractor` pickaxe; the GitHub
+label "Ractor Support" selects by intent. Scoring the 114
+labeled PRs against the studied set found 28 merged PRs no pass
+had read: 10 merged after the second pass cutoff and 18 inside
+its window whose commit messages never say ractor and whose
+diffs add no `Ractor` token, because a plain `.freeze`, a
+deleted memo, or an eager require needs neither. All 45 commits
+and every PR discussion were read in full, audition was run on
+both sides of the 43 files they touch, and every Ruby claim
+below was re-verified on Ruby 4.0.6. Numbered on from the
+catalog.
+
+### 21. Sentinels and Sets are constants too
+
+The follow-up to the MutableConstant sweep (c10c3c5bf4) froze
+what the cop cannot see: nine `NOT_GIVEN = Object.new`
+sentinels, `%w(...).to_set` and `Set.new([...])` lookups, arrays
+built by constant arithmetic (`(A + B + C).freeze`), an unfrozen
+array nested in an already frozen hash, and a hash whose keys
+are computed, rebuilt as one literal with `.encode!.freeze` keys
+instead of two index writes after the fact. Verified: an
+unfrozen `Object.new` in a constant raises from a worker and
+`Object.new.freeze` is shareable, the same for a Set of frozen
+strings; `BasicObject.new` has no `#freeze` at all, which is why
+`PRIMARY_KEY_NOT_SET` became an `Object`. Two constants were
+frozen by a bare `NAME.freeze` statement after the class body
+had populated them (TYPE_NAMES, PRE_CONTENT_STRINGS); the second
+stayed unshareable because a default proc survives the freeze,
+until 5949b7fc52 (pattern 3). 57475 applied the same sweep to
+Active Record: a `class_attribute` default frozen, the relation
+delegate cache frozen once populated, and two `@x ||=
+new.freeze` memos turned into frozen private constants, the
+origin of the shape in pattern 12. Its review also records a
+limit: a memo on `QueryAttribute` "can't be eagerly memoized"
+and was reverted. All of this is now an audition check (see
+below).
+
+### 22. Deleting a memo is a benchmark decision
+
+57642 set out to remove five class-level memos from Active
+Record (`arel_table`, `attribute_method_patterns_cache`,
+`attributes_builder`, `column_names`, `default_scope_override`)
+and its review thread is the most honest record of the trade in
+the series. benchmark-ips with `save!` and `compare!` against
+main showed `column_names` 7.4x and `arel_table` about 6x slower
+on the micro path, `respond_to?` 4.6x and `Post.new` 1.2x slower
+on real ones. The outcome: `column_names` deleted (7x on a path
+nothing hits hot); `symbol_column_to_string_name_hash` and
+`finder_needs_type_condition?` restored; `arel_table` kept as
+state but assigned eagerly in `included`, `inherited`,
+`table_name=` and the schema reload, with `Arel::Table#name`
+made lazy (`@name || @klass&.table_name`) so the object is cheap
+to build before the table name is known, 1.1x instead of 6x;
+`attribute_method_patterns_cache` assigned eagerly as a
+`Concurrent::Map` in `included` and `inherited`. audition flags
+that last one as class-level state on the post-PR file, and two
+months later 1a59302e64 (pattern 11) deleted it for a frozen
+index. A reviewer also had the justification comment on the
+cache removed: a cache that earns its keep "justifies itself by
+existing". The rule that fell out: measure with
+save-and-compare, delete when the miss path is cold,
+eager-assign when the object is cheap, and push the expensive
+part behind a lazy reader on an immutable field.
+
+### 23. Constants hold fixed values; everything else is an ivar
+
+Three PRs converge on a rule for registries. A constant is for
+a value fixed at definition. A value that changes after
+definition, in a load hook (57751: `ENVELOPE_SERIALIZERS << X`
+inside `on_load(:message_pack)`), through a registration API
+(57826: `Mime::SET`, `LOOKUP`, `EXTENSION_LOOKUP`), or at
+configuration time (57952: `parameter_parsers`), moves to a
+module ivar behind a reader, reassigned copy-on-write where it
+is frozen (`self.envelope_serializers = (envelope_serializers |
+[X]).freeze`). Public constants that leaked a registry become
+`DeprecatedObjectProxy` instances over the ivar, with new public
+API for whatever only the constant could do (`Mime.extensions`).
+The author measured the alternative: a lexically resolved
+constant reads about 1.08x faster than a module ivar reader on
+Ruby 4.0.5 (1.23x on 3.4) and the difference is invisible at
+the request level; the review settled on ivars because
+"registries or caches that get mutated" should not be
+constants, while a registry mutated only during initialization
+"could work better" as a constant later. Setters freeze what
+they store (`parameter_parsers=` freezes the transformed hash)
+and the default is assigned to the ivar directly to skip a
+needless copy. User-supplied parser procs are left alone: they
+are called, so only their author can decide whether they are
+shareable.
+
+### 24. Settings: class variables to singleton ivars plus delegate
+
+The framework-side version of pattern 18 (i18n), now the
+standard conversion for `mattr_accessor` and `cattr_accessor`
+settings (58627, 58643): `singleton_class.attr_accessor(
+*settings)` on the module, `delegate(*settings, to: TheModule)`
+for the instance-level readers that helpers use,
+`singleton_class.delegate` in the `included` block so
+`Request.strict_accept_header` keeps working for including
+classes, and the instance writers dropped, because an instance
+writing its class's setting was always a bug
+(`Request.new({}).ignore_accept_header = true` flipped the
+global). The values still need sharing: the railtie merges user
+config into the rescue tables, `Hash#merge` returns an unfrozen
+hash (verified), and an `after_initialize` block makes them
+shareable explicitly. audition confirms the conversion (all
+twelve `mattr_accessor`/`cattr_accessor` errors vanish) and then
+reports the seven new module ivars as class-level state, the
+adoption gap the i18n pass recorded: the target shape of the
+conversion still audits as an error until the boot-time sharing
+is visible. Whether a class ivar whose every in-file assignment
+is a shareable literal should be a warning instead is an open
+policy question (below).
+
+### 25. Capture-free boot procs, and the gate that finds them
+
+Booting with `unshareable_proc_action = :raise` is now a
+railties test (58659), and it caught a series of callbacks
+registered during boot that captured an unshareable object:
+`app` in initializer blocks, `reflection` in association
+callbacks, and the `length` and `prefix` locals of
+`has_secure_token`. The fix is one move: hoist the shareable
+leaf into a local before the lambda (`name = reflection.name`,
+`reloader = app.reloader`, `executor = app.executor`) and
+capture that. Verified on 4.0.6: a lambda that captures an
+unshareable object cannot be made shareable, one that captures
+a hoisted Symbol can, a `Class` instance is always shareable (so
+a reloader class can be captured), and a local reassigned after
+the lambda is refused by `make_shareable` as well ("outer
+variable 'x' may be reassigned"), which is why `prefix = ... if
+prefix == true` became a fresh `token_prefix`. The one value
+with no shareable leaf, the routes reloader, is stored on a
+reachable object (`app.reloader.routes_reloader`) and re-read
+inside the block through `self.class`, the late-binding anchor
+of pattern 15. A sibling fix: `Array(options[:on])` captured by
+the transaction callback condition lambdas needed `.freeze`
+(58653), because `Array()` returns a fresh unfrozen array
+(verified). None of this is visible statically; audition
+reports nothing on either side of these files. The boot gate is
+the detector.
+
+### 26. Share a copy; freeze in the setter
+
+Sharing the value that came out of user configuration froze the
+configuration itself (56d19e536b, pattern 16), and a gem that
+cleared `config.action_dispatch.default_headers` in an `on_load`
+hook that runs twice crashed on the second run. The correction
+(58656) is `make_shareable(value, copy: true)`: the response
+class gets a frozen copy and the config object stays mutable,
+its later writes ineffective rather than fatal (verified: the
+original stays unfrozen, the copy is shareable). The controller
+`default_url_options` went the other way (58483): the mattr
+default became `{}.freeze`, because in-place mutation of a
+class-level hash was never documented and produced
+autoload-order surprises (a subclass body writing
+`default_url_options[:lang]` changed every controller's
+redirects once it loaded); the test suite migrated from
+`default_url_options[:host] = x` to reassignment or to
+overriding the method, the documented API. Freezing a
+class-level config hash is presented as a bug fix, not a Ractor
+concession.
+
+### 27. Main-or-local singletons and per-Ractor rebuilds
+
+`ActiveSupport.event_reporter` (58599) keeps the ivar on the
+main Ractor and hands each worker an instance of its own:
+
+```ruby
+def self.event_reporter
+  return @event_reporter if ActiveSupport::Ractors.main?
+  Ractor[:__event_reporter] ||= ActiveSupport::EventReporter.new
+end
+```
+
+with the accepted consequence that subscribers registered on
+main are not seen by workers (the test asserts exactly that;
+shape verified). The same PR moved a `Concurrent::Map` constant
+(`PREFIXED_PARTIAL_NAMES`) behind a `store_if_absent` method,
+pattern 17 applied to a constant; audition was silent on that
+constant and now flags it, since `Concurrent::Map` defines no
+`#freeze` at all. The larger rebuild is `SchemaContext` (58578,
+the follow-up to ae739c3854): the context is frozen and made
+shareable right after `load_schema!`, and the attribute state
+(defaults, types, builder, column defaults), which serializes
+lazily by design and cannot be frozen, moves into an
+`Attributes` object built per Ractor under `store_if_absent`
+keyed by the context's `object_id`. Pending attribute
+modifications become copy-on-write (`[*@pending, mod]`) and
+`try_make_shareable` at schema load so workers can replay them;
+a `freeze` override loads the schema first (pattern 5); the two
+memos that need a connection stay on the model class behind
+`on_main` (pattern 12). The reviewer pushed for precomputed
+frozen defaults instead, and the author called the per-Ractor
+copy a stopgap on the way to "a mutable ractor safe data store"
+(the ractor_safe gem). The immediate cost: a per-Ractor rebuild
+reads configuration on a worker, so `time_zone_aware_types` and
+`skip_time_zone_conversion_for_attributes` had to be frozen in
+`after_initialize` (58642), with the PostgreSQL `<<` in a nested
+load hook rewritten as `+=` then freeze. Every config a
+worker-side build reads joins the shareable surface. Tests that
+spawn Ractors now run under forked isolation to avoid a Ruby
+crash.
+
+### 28. Subsystems expose a make_shareable! hook
+
+`ractorize!` grew two calls of one shape.
+`ActionView::PathRegistry.make_shareable!` (58640) warms every
+file-system resolver's templates, freezes the resolvers, then
+makes the two registries shareable under their mutex; and the
+controller configs are made shareable for
+`AbstractController::Base` and every descendant (58647), with
+freeze plus copy-on-write declined as complexity "that doesn't
+bring anything at the moment" since controller configs should
+not change after boot. Review notes worth keeping:
+`make_shareable` freezes in place, so no `dup` or reassignment
+is needed; a load hook is the wrong place for this, because it
+runs at load rather than after boot; and the author expects the
+code to disappear once global configuration becomes
+Ractor-mutable. All of it is eager-load-only, because a
+controller body can mutate the view path cache during autoload
+(`append_view_paths`).
+
+### 29. Boot-time loading hygiene
+
+Three PRs fix things that loaded during the first request of an
+eager-loaded app: `Request::Session` and `Utils` were autoloaded
+(moved under `Http::` and `eager_autoload`, 57856, with the
+discovery that `eager_load!` must be a class method on the
+namespace or nothing cascades); `require "useragent"` sat inside
+the request-time `allow_browser` method (57974) and moved into
+the class-level macro, a boot-time scope that still loads the
+gem only for apps using the feature, after a reviewer declined
+the file top; and `Template::Sources::File` was an
+`eager_autoload` no `eager_load!` chain reached (58062), fixed
+by inlining the one-constant namespace. The template lookup
+refactors (57780, 57783, 58279, 58280: raising and non-raising
+`find`, a single-pass `rank_for` instead of filter, sort, and
+bind-all, one lookup for the implicit render, and no
+`Concurrent::Map` allocated per uncached call) are the
+groundwork for 58390's per-Ractor template cache: shrink what
+the hot path touches before moving it per Ractor. A style note
+from 57859: `shareable_lambda { |x| ... }` in block form, not
+`shareable_lambda(&->(x) { ... })`.
+
+### What audition says about the 28 PRs (verified)
+
+Static scan of both sides of the 43 files these PRs touch, with
+the checks as they stood before this pass: 195 findings before,
+182 after. Confirmed conversions: every `cattr_accessor` and
+`mattr_accessor` error (12) is gone after the settings PRs; the
+`@empty ||= new.freeze` memos clear (`WhereClause`, `Type`);
+`JS_ESCAPE_MAP`'s rebuild and the metadata serializer constants
+clear; the `Concurrent::Map` that 57642 assigned eagerly is
+flagged, and was deleted later. What audition missed, and what
+changed because of it:
+
+- Nine `Object.new` sentinels, one `BasicObject.new`, three
+  `Set` constants, and the `Concurrent::Map` constant were
+  invisible on both sides. They are `mutable-constants` findings
+  now: a bare `Object.new` with a safe `.freeze` autofix,
+  withheld when the file gives the object singleton methods;
+  `BasicObject.new` with an `Object.new.freeze` replacement;
+  `Set.new([...])`, `Set[...]`, and `[...].to_set` as
+  containers; `Concurrent::Map` beside the sync primitives.
+  Rerun: 208 before, 180 after; all fourteen new findings sit on
+  the pre-PR side and none survive. On current rails/rails the
+  same rules find two sentinels, four Sets, and ten
+  `Concurrent::Map` constants (adapter quoting caches,
+  `ENCODED_BLANKS`) that no PR has touched.
+- Two false positives went away: `TYPE_NAMES` and `TAG_TYPES`
+  are built in the class body and frozen by a bare `NAME.freeze`
+  statement at the same level. The check treats that as
+  build-then-freeze and reports only provably mutable elements;
+  a freeze inside a method does not count.
+- The container autofix emits a plain `.freeze` when every
+  element is provably shareable and keeps the deep
+  `Ractor.make_shareable` wrap for the rest, which is what the
+  sweeps actually wrote; `X = :a, :b` gains brackets.
+- Advice text names the singleton-ivar-plus-delegate shape next
+  to `class_attribute` for the class-variable macros, and the
+  class-level macro as the boot-time scope for an optional
+  dependency's require. Advice no longer cites Rails as the
+  reason for a recipe and carries no commit ids; the reasons
+  stay in this document.
+
+Open, not implemented: the seven module ivars the settings PRs
+create audit as class-level-state errors. A warning for a class
+ivar whose every in-file assignment is a shareable literal would
+close the adoption gap for this conversion; whether the severity
+should drop is a policy call. Also left alone: the gvar and memo
+rewriters still wrap literal containers in
+`Ractor.make_shareable`, where the constants check now writes
+`.freeze`.

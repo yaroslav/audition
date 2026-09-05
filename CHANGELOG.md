@@ -53,6 +53,19 @@
   class-level macro as the boot-time scope for an optional
   dependency, and no advice cites Rails as the reason for a
   recipe or carries a commit id.
+- Fix knowledge base: fourth pass, the 28 merged "Ractor
+  Support" PRs that the commit-message and pickaxe selection of
+  the first two passes never saw (freezes, memo deletions, and
+  eager requires mention neither Ractor nor ractor). All 45
+  commits and their review threads read in full and distilled
+  into nine new patterns in docs/rails_core_best_practices.md:
+  sentinel and Set constants, benchmark-gated memo deletion,
+  constants versus module ivars for registries, settings as
+  singleton ivars plus delegate, capture-free boot procs and the
+  boot-in-raise-mode gate, share-a-copy and freeze-in-the-setter,
+  main-or-local singletons with per-Ractor rebuilds, subsystem
+  make_shareable! hooks, and boot-time loading hygiene. audition
+  was run on both sides of the 43 files the PRs touch.
 - Fix knowledge base: third pass, the gem dialect. i18n PR 741
   (the first full gem conversion out of the Rails ractorization
   effort) read in full and distilled into three new patterns in
