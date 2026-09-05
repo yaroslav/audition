@@ -58,16 +58,28 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     expect(findings).to be_empty
   end
 
-  it "brackets bare multi-value constants when wrapping" do
+  it "brackets bare multi-value constants when freezing" do
     code = "ATTRS = :a, :b, :c\n"
     finding = findings_for(code).first
 
     fix = finding.autofix
     fixed = code.dup
     fixed[fix.start_offset...fix.end_offset] = fix.replacement
+    expect(fixed).to eq("ATTRS = [:a, :b, :c].freeze\n")
+    expect(fix.unsafe?).to be(false)
+  end
+
+  it "brackets bare multi-value constants when wrapping" do
+    code = "ATTRS = :a, [:b]\n"
+    finding = findings_for(code).first
+
+    fix = finding.autofix
+    fixed = code.dup
+    fixed[fix.start_offset...fix.end_offset] = fix.replacement
     expect(fixed).to eq(
-      "ATTRS = Ractor.make_shareable([:a, :b, :c])\n"
+      "ATTRS = Ractor.make_shareable([:a, [:b]])\n"
     )
+    expect(fix.unsafe?).to be(true)
   end
 
   it "recognizes top-level-qualified sync primitives" do
@@ -382,5 +394,197 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     RUBY
 
     expect(findings).to be_empty
+  end
+  describe "plain freeze for provably shareable containers" do
+    it "appends .freeze when every element is shareable" do
+      code = "# frozen_string_literal: true\nLIST = [1, \"a\", :b]\n"
+      finding = findings_for(code).first
+
+      fix = finding.autofix
+      expect(fix.unsafe?).to be(false)
+      fixed = code.dup
+      fixed[fix.start_offset...fix.end_offset] = fix.replacement
+      expect(fixed).to end_with("LIST = [1, \"a\", :b].freeze\n")
+      expect(finding.fix).to include(".freeze")
+    end
+
+    it "freezes an empty hash bare" do
+      code = "CACHE = {}\n"
+      fix = findings_for(code).first.autofix
+
+      fixed = code.dup
+      fixed[fix.start_offset...fix.end_offset] = fix.replacement
+      expect(fixed).to eq("CACHE = {}.freeze\n")
+    end
+
+    it "keeps the deep wrap for unfrozen string elements" do
+      fix = findings_for("NAMES = [\"a\"]\n").first.autofix
+
+      expect(fix.replacement).to start_with("Ractor.make_shareable")
+      expect(fix.unsafe?).to be(true)
+    end
+  end
+
+  describe "sentinel objects" do
+    it "flags bare Object.new sentinels with a .freeze fix" do
+      code = "NOT_GIVEN = Object.new\n"
+      findings = findings_for(code)
+
+      expect(findings.size).to eq(1)
+      finding = findings.first
+      expect(finding.severity).to eq(:error)
+      expect(finding.message).to include("Object")
+      expect(finding.message).to include("Object.new")
+      fix = finding.autofix
+      expect(fix.unsafe?).to be(false)
+      fixed = code.dup
+      fixed[fix.start_offset...fix.end_offset] = fix.replacement
+      expect(fixed).to eq("NOT_GIVEN = Object.new.freeze\n")
+    end
+
+    it "accepts frozen sentinels" do
+      findings = findings_for(<<~RUBY)
+        DEFAULT = Object.new.freeze
+        POISON = ::Object.new.freeze
+      RUBY
+
+      expect(findings).to be_empty
+    end
+
+    it "replaces BasicObject sentinels, which cannot be frozen" do
+      code = "NOT_SET = BasicObject.new\n"
+      finding = findings_for(code).first
+
+      expect(finding.fix).to include("BasicObject")
+      fix = finding.autofix
+      expect(fix.unsafe?).to be(true)
+      fixed = code.dup
+      fixed[fix.start_offset...fix.end_offset] = fix.replacement
+      expect(fixed).to eq("NOT_SET = Object.new.freeze\n")
+    end
+
+    it "withholds the fix from sentinels the file customizes" do
+      findings = findings_for(<<~RUBY)
+        NULL = Object.new
+        def NULL.to_s = "null"
+        EXTENDED = Object.new
+        EXTENDED.extend(Comparable)
+        PLAIN = Object.new
+      RUBY
+
+      by_name = findings.to_h { |f| [f.message[/constant (\S+)/, 1], f] }
+      expect(by_name.keys)
+        .to contain_exactly("NULL", "EXTENDED", "PLAIN")
+      expect(by_name["NULL"].fixable?).to be(false)
+      expect(by_name["EXTENDED"].fixable?).to be(false)
+      expect(by_name["PLAIN"].fixable?).to be(true)
+    end
+
+    it "leaves Object.new with arguments or a block alone" do
+      findings = findings_for(<<~RUBY)
+        WITH_BLOCK = Object.new { }
+        SOMETHING = Widget.new
+      RUBY
+
+      expect(findings).to be_empty
+    end
+  end
+
+  describe "Set constants" do
+    it "flags Set factories as mutable containers" do
+      findings = findings_for(<<~RUBY)
+        # frozen_string_literal: true
+        IDS = %w(id id= id?).to_set
+        DIRS = Set.new([:asc, :desc])
+        KEYS = Set[1, 2]
+        EMPTY = Set.new
+      RUBY
+
+      expect(findings.map(&:line)).to eq([2, 3, 4, 5])
+      expect(findings).to all(have_attributes(severity: :error))
+      expect(findings.map(&:message)).to all(include("Set"))
+      expect(findings).to all(be_fixable)
+      expect(findings.map { |f| f.autofix.replacement })
+        .to all(eq(".freeze"))
+    end
+
+    it "treats a frozen Set of mutable elements as shallow" do
+      findings = findings_for(<<~RUBY)
+        STRS = Set.new(["a"]).freeze
+        NESTED = Set[[1]]
+      RUBY
+
+      expect(findings.map(&:line)).to eq([1, 2])
+      expect(findings.first.message).to include("frozen only")
+      expect(findings.last.autofix.replacement)
+        .to start_with("Ractor.make_shareable")
+    end
+
+    it "accepts frozen Sets of shareable elements and unknown sources" do
+      findings = findings_for(<<~RUBY)
+        # frozen_string_literal: true
+        IDS = %w(id id=).to_set.freeze
+        DIRS = Set.new([:asc]).freeze
+        DYNAMIC = Set.new(compute)
+        MAPPED = Set.new([1]) { |x| x.to_s }
+      RUBY
+
+      expect(findings).to be_empty
+    end
+  end
+
+  describe "constants frozen later in the same body" do
+    it "accepts a build-then-freeze at the same lexical level" do
+      findings = findings_for(<<~RUBY)
+        # frozen_string_literal: true
+        module XmlMini
+          TYPE_NAMES = { "Symbol" => "symbol" }
+          TYPE_NAMES["TimeWithZone"] = TYPE_NAMES["Time"]
+          TYPE_NAMES.freeze
+        end
+      RUBY
+
+      expect(findings.map(&:message)).to all(include("in-place"))
+      expect(findings.map(&:line)).to eq([4])
+    end
+
+    it "still reports mutable elements under a later freeze" do
+      findings = findings_for(<<~RUBY)
+        NESTED = { a: [1] }
+        NESTED.freeze
+      RUBY
+
+      expect(findings.size).to eq(1)
+      expect(findings.first.message).to include("frozen only")
+      expect(findings.first.fixable?).to be(false)
+    end
+
+    it "ignores freezes that live inside a method" do
+      findings = findings_for(<<~RUBY)
+        REGISTRY = {}
+        def self.finalize! = REGISTRY.freeze
+      RUBY
+
+      expect(findings.map(&:message))
+        .to include(a_string_including("mutable Hash"))
+    end
+
+    it "keeps flagging a default proc despite a later freeze" do
+      findings = findings_for(<<~RUBY)
+        PRE = Hash.new { "" }
+        PRE.freeze
+      RUBY
+
+      expect(findings.first.message).to include("default proc")
+    end
+  end
+
+  it "flags Concurrent::Map constants as never shareable" do
+    findings = findings_for("CACHE = Concurrent::Map.new\n")
+
+    expect(findings.size).to eq(1)
+    expect(findings.first.message).to include("Concurrent::Map")
+    expect(findings.first.fixable?).to be(false)
+    expect(findings.first.fix).to include("store_if_absent")
   end
 end

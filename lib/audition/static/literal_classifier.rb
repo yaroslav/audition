@@ -7,9 +7,10 @@ module Audition
     # Classifies a Prism expression node by Ractor shareability:
     #   :shareable         proven deeply shareable
     #   :mutable_string    unfrozen String literal
-    #   :mutable_container Array/Hash literal or constructor
-    #   :mutable_call      unfrozen String or Regexp returned by
-    #                      a call (`.tr`, `format`, `Regexp.new`)
+    #   :mutable_container Array/Hash/Set literal or constructor
+    #   :mutable_call      unfrozen String, Regexp, or sentinel
+    #                      Object returned by a call (`.tr`,
+    #                      `format`, `Regexp.new`, `Object.new`)
     #   :shallow_freeze    frozen container with mutable elements
     #   :sync_primitive    Mutex/Queue/... constructor
     #   :proc              lambda or proc
@@ -23,6 +24,15 @@ module Audition
         Thread::ConditionVariable
       ].freeze
       SHAREABLE_FACTORIES = %w[Struct Class Module].freeze
+      # Sentinels: `NOT_GIVEN = Object.new` raises when read from
+      # a worker until frozen, and a frozen bare Object is
+      # shareable (verified on Ruby 4.0.6). BasicObject has no
+      # #freeze.
+      SENTINEL_FACTORIES = %w[Object BasicObject].freeze
+      # Concurrent::Map defines no #freeze, so make_shareable
+      # raises NoMethodError on it; a constant holding one can
+      # never be shared (verified on 4.0.6 with concurrent-ruby).
+      UNFREEZABLE_COLLECTIONS = %w[Concurrent::Map].freeze
 
       # Calls returning a fresh, unfrozen String or Regexp;
       # `# frozen_string_literal: true` covers literals only.
@@ -95,6 +105,23 @@ module Audition
         end
       end
 
+      # What `value.freeze` would classify as, for the check to
+      # choose a plain `.freeze` over a deep wrap: :shareable
+      # when every element is provably shareable, :shallow_freeze
+      # when one is provably mutable, :unknown otherwise.
+      def frozen_kind(value)
+        case value
+        when Prism::ArrayNode, Prism::HashNode,
+             Prism::KeywordHashNode
+          deep_classify(value.elements)
+        when Prism::CallNode
+          elements = set_elements(value)
+          elements ? deep_classify(elements) : :unknown
+        else
+          :unknown
+        end
+      end
+
       private
 
       # Adjacent literals ("a" "b") parse as interpolation but
@@ -121,18 +148,26 @@ module Audition
           classify_freeze(node, receiver)
         when :new
           name = const_name(receiver)
-          return :sync_primitive if SYNC_PRIMITIVES.include?(name)
+          return :sync_primitive if SYNC_PRIMITIVES.include?(name) ||
+            UNFREEZABLE_COLLECTIONS.include?(name)
           return :shareable if SHAREABLE_FACTORIES.include?(name)
           return :proc if name == "Proc" && node.block
           # Hash.new retains its block as the default proc;
           # Array.new only uses its block to build elements.
           return :default_proc if name == "Hash" && node.block
+          return set_kind(node) if name == "Set"
+          if SENTINEL_FACTORIES.include?(name)
+            bare = node.arguments.nil? && node.block.nil?
+            return bare ? :mutable_call : :unknown
+          end
 
           if %w[Hash Array].include?(name)
             return :mutable_container
           end
 
           :unknown
+        when :[], :to_set
+          set_kind(node)
         when :define
           (const_name(receiver) == "Data") ? :shareable : :unknown
         when :make_shareable
@@ -158,6 +193,7 @@ module Audition
           case classify(receiver)
           when :default_proc then :default_proc
           when :mutable_call then :shareable
+          when :mutable_container then frozen_kind(receiver)
           else :unknown
           end
         else
@@ -194,12 +230,47 @@ module Audition
       # keeps a frozen Hash of Mutexes). The classification
       # propagates so no freeze or wrap is ever suggested.
       def container_kind(node)
-        sync = node.elements.any? do |element|
+        elements_kind(node.elements)
+      end
+
+      def elements_kind(elements)
+        sync = elements.any? do |element|
           element_children(element).any? do |child|
             classify(child) == :sync_primitive
           end
         end
         sync ? :sync_primitive : :mutable_container
+      end
+
+      # A Set built from literals is a container of them:
+      # `Set.new([...])`, `Set[...]`, `%w[...].to_set`. Anything
+      # else, such as `Set.new(compute)` or a mapping block,
+      # stays unknown.
+      def set_kind(node)
+        elements = set_elements(node)
+        elements ? elements_kind(elements) : :unknown
+      end
+
+      def set_elements(node)
+        return nil if node.block
+
+        case node.name
+        when :new, :[]
+          return nil unless const_name(node.receiver) == "Set"
+
+          args = node.arguments&.arguments || []
+          return args if node.name == :[]
+          return [] if args.empty?
+          return nil unless args.size == 1
+
+          args[0].is_a?(Prism::ArrayNode) ? args[0].elements : nil
+        when :to_set
+          receiver = node.receiver
+          return nil unless node.arguments.nil? &&
+            receiver.is_a?(Prism::ArrayNode)
+
+          receiver.elements
+        end
       end
 
       def element_children(element)

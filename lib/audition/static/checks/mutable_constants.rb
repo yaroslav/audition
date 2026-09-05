@@ -30,21 +30,23 @@ module Audition
                "literals only; a method call returns a fresh " \
                "unfrozen object, so a non-main Ractor reading " \
                "this constant raises Ractor::IsolationError. " \
-               "Rails hit this with `.tr` and `Regexp.new` " \
-               "during its ractorization.",
-          fix: "Append `.freeze` to the call; a frozen String " \
-               "or Regexp is deeply shareable."
+               "Typical shapes: `.tr`, `Regexp.new`, and " \
+               "`Object.new` sentinels.",
+          fix: "Append `.freeze` to the call; a frozen String, " \
+               "Regexp, or bare Object is deeply shareable. " \
+               "BasicObject has no #freeze: use " \
+               "Object.new.freeze for such a sentinel."
 
         explain :mutable_container,
           severity: :error,
           message: "constant %{name} holds a mutable %{type} " \
                    "literal",
           why: CONSTANT_WHY,
-          fix: "Make it deeply shareable: " \
-               "`# shareable_constant_value: literal`, or " \
-               "wrap in Ractor.make_shareable(...). A bare " \
-               "`.freeze` is not enough when elements are " \
-               "themselves mutable."
+          fix: "Append `.freeze` when every element is itself " \
+               "shareable; otherwise make it deeply shareable with " \
+               "`# shareable_constant_value: literal` or " \
+               "Ractor.make_shareable(...), since a bare " \
+               "`.freeze` is shallow."
 
         explain :shallow_freeze,
           severity: :error,
@@ -62,12 +64,15 @@ module Audition
         explain :sync_primitive,
           severity: :error,
           message: "constant %{name} holds a %{klass}; sync " \
-                   "primitives are deliberately unshareable",
+                   "primitives and concurrent collections are " \
+                   "deliberately unshareable",
           why: "Mutex/Queue/ConditionVariable coordinate " \
                "threads inside one Ractor and can never be " \
                "shared across Ractors; any non-main Ractor " \
                "touching this constant raises " \
-               "Ractor::IsolationError.",
+               "Ractor::IsolationError. A concurrent-ruby Map " \
+               "defines no #freeze at all, so make_shareable " \
+               "raises NoMethodError on it.",
           fix: "Use Ractor::Port for cross-Ractor " \
                "coordination; keep a per-Ractor primitive " \
                "via Ractor.store_if_absent when the state it " \
@@ -144,21 +149,30 @@ module Audition
 
           # A constant this file itself mutates in place is a
           # deliberate accumulator; freezing it would raise at
-          # the mutation site (sinatra's PARAMS_CONFIG). The
+          # the mutation site (sinatra's PARAMS_CONFIG). One it
+          # gives singleton methods raises the same way. The
           # finding stays, the autofix goes.
-          fix_ok = !mutated?(name)
-          case classifier.classify(value)
+          fix_ok = !mutated?(name) && !customized?(name)
+          kind = classifier.classify(value)
+          # Build-then-freeze: a bare `NAME.freeze` later in the
+          # same body makes the literal as good as frozen, so
+          # only provably mutable elements remain to report.
+          if kind == :mutable_container && frozen_later?(name)
+            kind = classifier.frozen_kind(value)
+            fix_ok = false
+          end
+          case kind
           when :mutable_string
             flag(node, :mutable_string, name: name,
               autofix: fix_ok ? append_freeze(value) : nil)
           when :mutable_call
             flag(node, :mutable_call, name: name,
               type: call_type(value), method: call_display(value),
-              autofix: fix_ok ? append_freeze(value) : nil)
+              autofix: fix_ok ? freeze_call(value) : nil)
           when :mutable_container
             flag(node, :mutable_container, name: name,
               type: container_type(value),
-              autofix: fix_ok ? wrap_make_shareable(value) : nil)
+              autofix: fix_ok ? freeze_container(value) : nil)
           when :shallow_freeze
             flag(node, :shallow_freeze, name: name,
               autofix:
@@ -186,10 +200,18 @@ module Audition
           end
         end
 
-        def mutated?(name)
+        def mutated?(name) = named_in?(file.mutated_constants, name)
+
+        def customized?(name)
+          named_in?(file.customized_constants, name)
+        end
+
+        def frozen_later?(name) = named_in?(file.frozen_constants, name)
+
+        def named_in?(names, name)
           bare = name.split("::").last
-          file.mutated_constants.any? do |mutated|
-            mutated == name || mutated.split("::").last == bare
+          names.any? do |other|
+            other == name || other.split("::").last == bare
           end
         end
 
@@ -262,6 +284,8 @@ module Audition
           when Prism::HashNode, Prism::KeywordHashNode then "Hash"
           when Prism::ArrayNode then "Array"
           when Prism::CallNode
+            return "Set" if value.name == :to_set
+
             classifier.const_name(value.receiver) || "container"
           else
             "container"
@@ -277,8 +301,11 @@ module Audition
         # Ternaries classify as strings when both branches are;
         # `.freeze` binds tighter than `?:`, so they get parens.
         def call_type(call)
-          owner = classifier.const_name(call.receiver)
-          (owner == "Regexp") ? "Regexp" : "String"
+          case classifier.const_name(call.receiver)
+          when "Regexp" then "Regexp"
+          when "Object", "BasicObject" then "Object"
+          else "String"
+          end
         end
 
         def call_display(call)
@@ -294,8 +321,11 @@ module Audition
         # the bare suffix.
         def bare_freezable?(value)
           case value
-          when Prism::StringNode, Prism::InterpolatedStringNode
+          when Prism::StringNode, Prism::InterpolatedStringNode,
+               Prism::HashNode
             true
+          when Prism::ArrayNode
+            !value.opening_loc.nil?
           when Prism::CallNode
             !value.opening_loc.nil? ||
               (!value.receiver.nil? && value.arguments.nil?)
@@ -305,6 +335,16 @@ module Audition
         end
 
         def append_freeze(value)
+          # `X = :a, :b` has no brackets; it gains them so the
+          # suffix freezes the whole array.
+          if value.is_a?(Prism::ArrayNode) && value.opening_loc.nil?
+            return Autofix.new(
+              start_offset: value.location.start_offset,
+              end_offset: value.location.end_offset,
+              replacement: "[#{value.location.slice}].freeze"
+            )
+          end
+
           if bare_freezable?(value)
             offset = value.location.end_offset
             Autofix.new(
@@ -319,6 +359,31 @@ module Audition
               end_offset: value.location.end_offset,
               replacement: "(#{source}).freeze"
             )
+          end
+        end
+
+        # A frozen bare Object is shareable; BasicObject has no
+        # #freeze, so its sentinel becomes a frozen Object.
+        def freeze_call(value)
+          return append_freeze(value) unless
+            classifier.const_name(value.receiver) == "BasicObject"
+
+          Autofix.new(
+            start_offset: value.location.start_offset,
+            end_offset: value.location.end_offset,
+            replacement: "Object.new.freeze",
+            safety: :unsafe
+          )
+        end
+
+        # Plain `.freeze` where every element is provably
+        # shareable, the plain-Ruby shape; the deep wrap only
+        # where a shallow freeze would not be enough.
+        def freeze_container(value)
+          if classifier.frozen_kind(value) == :shareable
+            append_freeze(value)
+          else
+            wrap_make_shareable(value)
           end
         end
 

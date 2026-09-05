@@ -175,7 +175,7 @@ RSpec.describe "unsafe rewriters" do
 
       content = File.read(path)
       expect(content).not_to include("shareable_constant_value")
-      expect(content).to include("CACHE = Ractor.make_shareable({})")
+      expect(content).to include("CACHE = {}.freeze")
     end
   end
 

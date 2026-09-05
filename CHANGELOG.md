@@ -30,6 +30,23 @@
   top-level file under `lib/`, the probe now requires it after
   the name and its slashed form fail, and reports the last error
   seen rather than the first.
+- Mutable constants learn three shapes, each verified on Ruby
+  4.0.6: a bare `Object.new` sentinel (safe `.freeze` autofix,
+  withheld when the file gives the object singleton methods;
+  `BasicObject.new`, which has no `#freeze`, gets an
+  `Object.new.freeze` replacement in the unsafe tier),
+  `Set.new([...])`, `Set[...]`, and `[...].to_set` as containers,
+  and `Concurrent::Map`, which cannot be frozen at all, beside
+  the sync primitives. A constant frozen by a bare `NAME.freeze`
+  statement later in the same class body now counts as
+  build-then-freeze, so only provably mutable elements are
+  reported. The container autofix writes a plain `.freeze` when
+  every element is provably shareable and keeps the deep
+  `Ractor.make_shareable` wrap otherwise; bracket-less
+  `X = :a, :b` gains its brackets. On the 43 Rails files studied
+  below the new rules flag all fourteen sites the PRs fixed and
+  none after; on current rails/rails they find sixteen more that
+  no PR has touched.
 - Fix knowledge base: third pass, the gem dialect. i18n PR 741
   (the first full gem conversion out of the Rails ractorization
   effort) read in full and distilled into three new patterns in

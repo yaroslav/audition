@@ -152,6 +152,76 @@ module Audition
       # shaped like `# key: value`, which sweeps up documentation
       # (`# I18n.t: 'date.formats.short'`); inserting after those
       # would land a magic comment mid-file.
+      # Constants frozen by a bare `NAME.freeze` statement at the
+      # same lexical level as a file, class, or module body: the
+      # build-then-freeze shape. A freeze inside a method does
+      # not count; nothing guarantees it runs before a Ractor
+      # reads the constant.
+      # @return [Array<String>]
+      def frozen_constants
+        @frozen_constants ||= begin
+          names = []
+          bodies = [root.statements]
+          until bodies.empty?
+            statements = bodies.shift
+            next unless statements.is_a?(Prism::StatementsNode)
+
+            statements.body.each do |node|
+              case node
+              when Prism::ModuleNode, Prism::ClassNode,
+                   Prism::SingletonClassNode
+                bodies << node.body
+              when Prism::CallNode
+                next unless node.name == :freeze &&
+                  node.arguments.nil? && node.block.nil?
+
+                name = constant_receiver(node.receiver)
+                names << name if name
+              end
+            end
+          end
+          names.uniq
+        end
+      end
+
+      # Calls that give a constant's object singleton behavior;
+      # freezing the object first makes them raise FrozenError
+      # (`NULL = Object.new; def NULL.to_s = "null"`).
+      CONST_CUSTOMIZERS = %i[
+        extend define_singleton_method instance_eval instance_exec
+        singleton_class instance_variable_set
+      ].freeze
+
+      # @return [Array<String>] names of constants that receive a
+      #   singleton method definition or a customizing call
+      def customized_constants
+        @customized_constants ||= begin
+          names = []
+          queue = [root]
+          until queue.empty?
+            node = queue.shift
+            queue.concat(node.child_nodes.compact)
+            receiver =
+              if node.is_a?(Prism::DefNode)
+                node.receiver
+              elsif node.is_a?(Prism::CallNode) &&
+                  CONST_CUSTOMIZERS.include?(node.name)
+                node.receiver
+              end
+            name = constant_receiver(receiver)
+            names << name if name
+          end
+          names.uniq
+        end
+      end
+
+      def constant_receiver(node)
+        case node
+        when Prism::ConstantReadNode then node.name.to_s
+        when Prism::ConstantPathNode then node.location.slice
+        end
+      end
+
       MAGIC_KEYS = %w[
         encoding coding frozen_string_literal
         shareable_constant_value warn_indent

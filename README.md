@@ -28,8 +28,10 @@ core itself is being ractorized; see the
   (which rule of the Ractor model it violates) and a `fix`
   (what to write instead).
 - **`--fix` like RuboCop, in two tiers.** Safe corrections:
-  `.freeze` on string constants, `Ractor.make_shareable(...)` for
-  mutable and shallow-frozen containers and Proc constants, and
+  `.freeze` on string constants, sentinels, and containers whose
+  elements are all shareable, `Ractor.make_shareable(...)` for
+  the remaining mutable and shallow-frozen containers and for
+  Proc constants, and
   boot-time hoisting of method-body requires. `--fix-unsafe` adds
   semantics-affecting rewrites: magic-comment insertion,
   freeze-on-memoize for class-level memoization (both `@x ||=`
