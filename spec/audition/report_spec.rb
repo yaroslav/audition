@@ -3,7 +3,7 @@
 RSpec.describe Audition::Report do
   def finding(severity: :error, path: "lib/a.rb", line: 3,
     autofix: nil, check: "global-variables",
-    dependency: false)
+    dependency: false, test: false)
     Audition::Finding.new(
       check: check,
       severity: severity,
@@ -14,7 +14,8 @@ RSpec.describe Audition::Report do
       line: line,
       source: "$x + 1",
       autofix: autofix,
-      dependency: dependency
+      dependency: dependency,
+      test: test
     )
   end
 
@@ -68,6 +69,18 @@ RSpec.describe Audition::Report do
 
     it "is ready when nothing was found" do
       expect(report_for([]).verdict).to eq(:ready)
+    end
+
+    it "ignores test findings at every severity" do
+      findings = [finding(test: true, path: "spec/a_spec.rb"),
+        finding(severity: :warning, test: true,
+          path: "spec/a_spec.rb")]
+      report = report_for(findings)
+
+      expect(report.verdict).to eq(:ready)
+      expect(report.counts[:error]).to eq(0)
+      expect(report.counts[:test_error]).to eq(1)
+      expect(report.counts[:test_warning]).to eq(1)
     end
 
     it "is blocked when a dynamic probe failed without findings" do
@@ -167,6 +180,23 @@ RSpec.describe Audition::Report do
       expect(two).to include("2 errors")
     end
 
+    it "marks test findings and totals them in the summary" do
+      style = Audition::Report::Style.new(
+        color: false, hyperlinks: false
+      )
+      text = render_text(report_for([
+        finding(test: true, path: "spec/a_spec.rb"),
+        finding(severity: :warning, test: true,
+          path: "spec/a_spec.rb")
+      ]), style)
+
+      expect(text).to include("(tests)")
+      expect(text).to include(
+        "2 test findings (1 error / 1 warning / 0 info)"
+      )
+      expect(text).to include("ractor-ready as far as Audition")
+    end
+
     it "keeps overlong tokens intact when wrapping" do
       url = "https://example.com/#{"z" * 90}"
       style = Audition::Report::Style.new(
@@ -185,7 +215,7 @@ RSpec.describe Audition::Report do
       out = render_github(report_for([finding]))
 
       expect(out).to include(
-        "::error file=lib/a.rb,line=3,title=audition " \
+        "::error file=lib/a.rb,line=3,title=Audition " \
         "global-variables::"
       )
       expect(out).to include("read of global variable $x")
@@ -199,7 +229,7 @@ RSpec.describe Audition::Report do
       out = render_github(report_for([weird]))
 
       expect(out).to include("file=lib/a%2Cb%25%3Ac.rb,line=3,")
-      expect(out).to include("title=audition global-variables::")
+      expect(out).to include("title=Audition global-variables::")
     end
 
     it "strips the ./ prefix so annotations anchor to files" do
@@ -215,7 +245,7 @@ RSpec.describe Audition::Report do
         finding, finding(severity: :warning)
       ])).summary
 
-      expect(md).to include("## audition: not ractor-ready")
+      expect(md).to include("## Audition: not ractor-ready")
       expect(md).to include("| errors | 1 |")
       expect(md).to include("| warnings | 1 |")
     end
@@ -241,6 +271,17 @@ RSpec.describe Audition::Report do
       expect(json["verdict"]).to eq("blocked")
       expect(json["summary"]["errors"]).to eq(0)
       expect(json["summary"]["dependency_errors"]).to eq(1)
+    end
+
+    it "splits test findings out in the summary" do
+      json = JSON.parse(render_json(report_for([
+        finding(test: true, path: "spec/a_spec.rb")
+      ])))
+
+      expect(json["verdict"]).to eq("ready")
+      expect(json["summary"]["errors"]).to eq(0)
+      expect(json["summary"]["test_errors"]).to eq(1)
+      expect(json["findings"].first["test"]).to be(true)
     end
   end
 end

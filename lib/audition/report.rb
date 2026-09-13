@@ -9,7 +9,7 @@ module Audition
       not_ready: "not ractor-ready",
       blocked: "own code is ractor-ready; blocked by dependencies",
       risky: "risky: warnings only, no hard errors",
-      ready: "ractor-ready as far as audition can tell"
+      ready: "ractor-ready as far as Audition can tell"
     }.freeze
 
     attr_reader :target_type, :target_root, :findings,
@@ -60,13 +60,19 @@ module Audition
       counts[:dep_error].positive?
     end
 
+    # Test findings count apart at every severity: they are the
+    # target's code, but a production boot never loads them, so
+    # they never touch the verdict.
     def counts
       @counts ||= begin
         base = {error: 0, dep_error: 0, warning: 0, info: 0,
+                test_error: 0, test_warning: 0, test_info: 0,
                 fixable: 0}
         findings.each_with_object(base) do |f, acc|
           if f.error? && f.dependency?
             acc[:dep_error] += 1
+          elsif f.test?
+            acc[:"test_#{f.severity}"] += 1
           else
             acc[f.severity] += 1
           end
@@ -86,3 +92,4 @@ require_relative "report/style"
 require_relative "report/text"
 require_relative "report/json"
 require_relative "report/github"
+require_relative "report/sweep"

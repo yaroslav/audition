@@ -21,7 +21,7 @@ module Audition
 
       def header
         s = @style
-        title = s.bold("audition #{VERSION}")
+        title = s.bold("Audition #{VERSION}")
         meta = s.dim(
           "ruby #{RUBY_VERSION} · #{@report.target_type} at " \
           "#{@report.target_root}"
@@ -45,8 +45,10 @@ module Audition
         fix_mark = finding.fixable? ? " #{s.cyan(s.glyph(:fix))}" : ""
         dep_mark =
           finding.dependency? ? " #{s.dim("(dependency)")}" : ""
+        test_mark = finding.test? ? " #{s.dim("(tests)")}" : ""
         head = "    #{glyph} #{loc}#{finding.message}" \
-               "#{fix_mark}#{dep_mark} #{s.dim(finding.check)}"
+               "#{fix_mark}#{dep_mark}#{test_mark} " \
+               "#{s.dim(finding.check)}"
         [head,
           *annotation("why", finding.why),
           *annotation("fix", finding.fix)]
@@ -113,6 +115,15 @@ module Audition
           parts << s.yellow(pluralize(c[:warning], "warning"))
         end
         parts << s.cyan("#{c[:info]} info") if c[:info].positive?
+        test_total = c[:test_error] + c[:test_warning] +
+          c[:test_info]
+        if test_total.positive?
+          parts << s.dim(
+            pluralize(test_total, "test finding") +
+            " (#{c[:test_error]} error / " \
+            "#{c[:test_warning]} warning / #{c[:test_info]} info)"
+          )
+        end
         if c[:fixable].positive?
           parts << s.cyan(
             "#{c[:fixable]} fixable #{s.glyph(:fix)} " \

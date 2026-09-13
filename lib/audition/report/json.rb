@@ -32,6 +32,9 @@ module Audition
           "dependency_errors" => counts[:dep_error],
           "warnings" => counts[:warning],
           "infos" => counts[:info],
+          "test_errors" => counts[:test_error],
+          "test_warnings" => counts[:test_warning],
+          "test_infos" => counts[:test_info],
           "fixable" => counts[:fixable]
         }
       end
@@ -48,7 +51,8 @@ module Audition
             "line" => f.line,
             "source" => f.source,
             "fixable" => f.fixable?,
-            "dependency" => f.dependency?
+            "dependency" => f.dependency?,
+            "test" => f.test?
           }
         end
       end

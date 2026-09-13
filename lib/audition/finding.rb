@@ -64,12 +64,14 @@ module Audition
   #   @return [Autofix, nil] machine-applicable correction
   # @!attribute [r] dependency
   #   @return [Boolean] see {#dependency?}
+  # @!attribute [r] test
+  #   @return [Boolean] see {#test?}
   Finding = Data.define(
     :check, :severity, :message, :why, :fix,
-    :path, :line, :source, :autofix, :dependency
+    :path, :line, :source, :autofix, :dependency, :test
   ) do
     def initialize(source: nil, autofix: nil, dependency: false,
-      **rest)
+      test: false, **rest)
       super
     end
 
@@ -81,6 +83,12 @@ module Audition
     #
     # @return [Boolean]
     def dependency? = dependency
+
+    # True when the problem lives in the target's test or spec
+    # code: real, but never loaded by the production boot.
+    #
+    # @return [Boolean]
+    def test? = test
 
     # @return [Boolean] whether an {Autofix} is attached
     def fixable? = !autofix.nil?
