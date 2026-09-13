@@ -1,5 +1,147 @@
 # Changelog
 
+## [Unreleased]
+
+- Progress narration on stderr, stdout left pipeable:
+  `◆ Audition checking 50/919 5% (0.2s, on 8 ractors)`,
+  rewritten in place on a terminal, one line per phase off one.
+  A phase running in Ractors says how many, next to the clock
+  rather than the counts. On above 200 files and for every
+  bundle sweep, off for `--format json` and `--format github`;
+  `--progress` / `--no-progress` force either way.
+- Files are dealt to scan Ractors largest-first, onto whichever
+  worker is carrying least (longest-processing-time-first).
+  Contiguous slices put neighbouring files—alike in size—on one
+  worker, which left a single Ractor still running well after
+  the others had finished: 2,500 files went 2.3s to 1.1s on 8
+  workers.
+- Worker count is now every core the Ractor pool can run,
+  `Etc.nprocessors` capped by `RUBY_MAX_CPU` (default 8), where
+  it was one less than the core count. Ractors past that cap add
+  no parallelism; `-j` / `--workers` overrides.
+- The graph audit's four whole-tree walks now run in the same
+  Ractors, above 100 files. Each worker parses its slice once
+  and keeps the trees: one round reports the class and module
+  names its slice declares, and once those are merged a second
+  round walks the same trees against them. 3,400 files went
+  2.4s to 1.2s on 8 workers, the whole phase 3.8s to 2.6s.
+- New check `static-scan`, for the static pass's own blind
+  spots. rubydex reports every expression it could not resolve;
+  where the shape could hide what the class-state and constant
+  walks look for, the hole is now a finding instead of a clean
+  line: a singleton opened on a runtime receiver that writes
+  class-level state (`class << pick_target` around
+  `@cache = {}`), a runtime superclass or mixin argument
+  (`class Widget < base`, `include Object.const_get(name)`),
+  and a constant assigned through an unresolved path
+  (`TABLE = mod::Lookup`, info). Only the class and module
+  bodies are read, so an `include` matcher in a spec stays
+  silent, and a line another check already reported keeps its
+  own finding.
+- New `.audition.yml` key `test_dirs`, for a project that files
+  its tests somewhere other than `test`, `spec` or `features`.
+  Findings under those directories are tagged `test` and
+  counted apart from production code. The list replaces the
+  default rather than adding to it; the `_test.rb` and
+  `_spec.rb` suffixes count whatever it says.
+- Color on every output surface, not just the findings list.
+  The bundle sweep gained a titled table: severity glyphs on
+  the verdicts, one color per row, blank cells where a count is
+  zero. Usage text, the baseline line, fix and dry-run output,
+  `--compare` deltas and `--capabilities` too. `--plain`,
+  `NO_COLOR` and `TERM=dumb` strip all of it.
+- New check `native-gem-calls`, for calls into a C extension
+  that never declared `rb_ext_ractor_safe`: they raise
+  `Ractor::UnsafeError`, and the extension is outside the tree,
+  so the call site is what gets flagged. Which gems count comes
+  from the target's own `Gemfile.lock`, its installed extension
+  binaries and its generated type stubs—never a gem list—and a
+  platform build Audition cannot inspect is reported as
+  unverified. Taint then follows the values: chained calls,
+  locals and ivars, `sig`/`T.let`/`T.cast` types, `case`/`when`
+  and `is_a?` narrowing, block element parameters, arguments
+  into other methods, reopened classes, mixin bodies, and
+  across files until nothing new is learned.
+- Rails targets scan the whole root, not just `app`, `lib` and
+  `config`—local gems, engines and tests boot into the same
+  process. Vendored and scratch directories stay excluded.
+  Indexing another call's result (`Registry.by_name["KEY"]`) is
+  an unprovable call result.
+- New `shallow_opaque` finding: `X.new.freeze`,
+  `compute.freeze`, and frozen containers of fresh instances or
+  unprovable call results freeze the wrapper, not the value. A
+  later bare `NAME.freeze` counts the same, and one unknown
+  element no longer excuses a provably fresh sibling, so
+  `T.let({KEY => Widget.new(...)}.freeze, ...)` now reports.
+- Class-level state finds three more shapes: `attr_accessor` or
+  `attr_writer` on a singleton class (the declaration itself,
+  plus every assignment through one), ivars assigned by
+  instance methods of a module something `extend`s, and
+  `instance_variable_set("@x", v)` or
+  `remove_instance_variable(:@x)` where the receiver is
+  provably a class. Computed names, unprovable receivers,
+  `instance_variable_get`, `instance_variable_defined?` and
+  `instance_variables` stay quiet.
+- New check `dependency-class-state`: a dependency holding its
+  configuration in a class-level ivar has no source in the
+  tree, so the call site is flagged; the target's own type
+  stubs say which calls are attribute reads. Reads warn, writes
+  error.
+- New check `derived-constants`: an alias (`DEFAULT = PRIMARY`)
+  or a frozen container of references (`ALL = [A, B].freeze`)
+  inherits the referent's finding. `mutable-constants` findings
+  seed a graph pass that propagates along constant references,
+  transitively and across files, at the source's severity.
+- New check `unshareable-reads`: reading a gem constant that
+  holds an unshareable object warns at the read site, `sig`
+  blocks included—Sorbet's `T::Boolean` is an unfrozen, lazily
+  memoizing `TypeAlias`.
+- Test findings are counted apart. Anything under `test/`,
+  `spec/` or `features/`, or in a `_test.rb`/`_spec.rb` file,
+  is marked `(tests)` in text and `"test"` in JSON and never
+  moves the verdict or the exit code.
+- `T.let`, `T.cast` and `T.must` are unwrapped everywhere:
+  classification, the reported container type (no more "mutable
+  T literal"), depth checks and autofixes all see the value
+  inside. The safe fix is now `T.let({...}.freeze, ...)`, not a
+  freeze on the cast.
+- Dynamic findings pin the failing line. The harness ships a
+  backtrace with every error, so script, rack, Rails boot and
+  load failures land on the deepest frame inside the target
+  instead of `line: nil` on the entry file.
+- Constant sweep limit 5,000 → 200,000, and hitting it is a
+  `runtime-scan` warning naming the count and the limit instead
+  of silent truncation; probes take `max_constants`. A failed
+  Rails boot keeps the sweep of everything loaded before it,
+  and the rails probe realpaths the environment file so a
+  symlinked root (macOS `/var`) stops turning the app's own
+  findings into dependency findings.
+- The sweep catches state planted on classes that already
+  existed—a cache ivar on `String`, a class variable on a
+  stdlib module. Every pre-boot module's ivars and class
+  variables are snapshotted (without forcing autoloads) and
+  diffed after the boot; RubyGems, Bundler and VM internals are
+  excluded as probe machinery.
+- Rack targets get the full sweep, not just the boot-and-serve
+  verdict: the same constant, class-state, class-variable and
+  native-extension passes require and Rails targets already
+  got.
+- Unshareable constants name their blocker: "just not frozen"
+  where freezing the value fixes it, "blocked by unfrozen
+  String inside" or "blocked by Proc inside" where it does not.
+- `begin ... end` is classified by its last statement, so a
+  constant built in a block is reported and fixed instead of
+  reading as opaque; an inline cast around it is peeled in
+  either order. A block with `rescue`, `else` or `ensure` stays
+  opaque.
+- More call shapes classified: a `Set` from an opaque source or
+  a mapping block is a mutable container whatever it holds;
+  indexing a constant (`Mime[:xml]`) is an unprovable call
+  result, with `ENV` and Sorbet's `T` constructors silent; and
+  `File.expand_path`, `join`, `dirname`, `basename`,
+  `absolute_path` and `realpath` return fresh Strings—mutable
+  bare, shareable frozen.
+
 ## [0.3.0] - 2026-09-05
 
 - Native extensions. `audition .` in a gem checkout, `audition
@@ -64,7 +206,7 @@
   singleton ivars plus delegate, capture-free boot procs and the
   boot-in-raise-mode gate, share-a-copy and freeze-in-the-setter,
   main-or-local singletons with per-Ractor rebuilds, subsystem
-  make_shareable! hooks, and boot-time loading hygiene. audition
+  make_shareable! hooks, and boot-time loading hygiene. Audition
   was run on both sides of the 43 files the PRs touch.
 - Fix knowledge base: third pass, the gem dialect. i18n PR 741
   (the first full gem conversion out of the Rails ractorization
@@ -72,7 +214,7 @@
   docs/rails_core_best_practices.md: config class variables
   moving to singleton-class ivars behind delegators, the opt-in
   `<gem>/ractorize` entry point, and frozen caches degrading to
-  recompute-per-call. audition was run on both sides of the PR
+  recompute-per-call. Audition was run on both sides of the PR
   to verify its checks against the conversion; it confirmed the
   fixes, caught a `.freeze` lost in a rebase and a class
   variable read that still raises from workers (reproduced on
@@ -96,7 +238,7 @@
   argument was silently ignored. README gained a CI and git
   hooks section with copy-paste lefthook, pre-commit, and
   GitHub Actions configs.
-- Dogfooding: this repository now runs audition on itself, on
+- Dogfooding: this repository now runs Audition on itself, on
   every commit through lefthook (staged files, static) and on
   every push through a non-blocking CI self-audit with PR
   annotations and a job summary.
@@ -106,13 +248,13 @@
   deployment mode and Actions' bundler-cache put every gem in
   `vendor/bundle`) count as dependencies, not as the target's
   own code. Found by the very first CI self-audit, which
-  attributed the vendored gems to audition itself and flipped
+  attributed the vendored gems to Audition itself and flipped
   the verdict from blocked to not_ready.
 - Report rendering split into one class per format
   (`Report::Text`, `Report::Json`, `Report::Github`); the
   `Report` class keeps only the data, verdict, and counts. The
   `Report#to_text/to_json/to_github` methods are gone, an API
-  change for anyone driving audition programmatically.
+  change for anyone driving Audition programmatically.
 
 ## [0.2.4] - 2026-08-23
 
@@ -129,7 +271,7 @@
   main: the 61 ractorization commits that landed after the first
   study (through 2026-08-20) were read in full and distilled into
   seven new patterns in docs/rails_core_best_practices.md, with
-  every claim that touches audition's behavior verified on Ruby
+  every claim that touches Audition's behavior verified on Ruby
   4.0.6. The check advice, autofix recipes, README, and agent
   skill below follow from that refresh.
 - New mutable-constants finding, with a safe `.freeze` autofix,
@@ -163,11 +305,11 @@
   rerun, spraying Ractor backtraces on stderr first, whenever a
   scanned file sends the capture scanner after local variables.
   Its visit methods were generated with define_method, the exact
-  un-shareable-Proc pattern audition's own unsafe-calls check
+  un-shareable-Proc pattern Audition's own unsafe-calls check
   flags (and a pragma silenced), so the first dispatch from a
   worker Ractor raised. They are plain defs now, and the check
   is covered by an in-Ractor regression spec. Found while
-  verifying rubydex 0.3.0, which audition now runs on: findings
+  verifying rubydex 0.3.0, which Audition now runs on: findings
   are byte-identical to 0.2.9 on real gems and no API we consume
   changed, so the dependency floor stays at 0.2.
 

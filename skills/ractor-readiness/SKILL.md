@@ -12,18 +12,18 @@ description: Use when asked whether Ruby code (a gem, script,
 license: MIT
 ---
 
-# Checking and fixing Ractor readiness with audition
+# Checking and fixing Ractor readiness with Audition
 
 ## Overview
 
-audition (a Ruby gem) probes any target for Ractor readiness:
+Audition (a Ruby gem) probes any target for Ractor readiness:
 script, gem, directory, Rack app, Rails root, or a whole
 Gemfile.lock. Static Prism and rubydex checks plus a dynamic
 probe that loads the target inside a real Ractor; every finding
 carries a why and a fix, and mechanical fixes are automated. Do
 not hand-roll Ractor analysis or re-verify Ruby 4.0 Ractor
 semantics; the tool encodes them, verified empirically. Written
-against audition 0.3.x.
+against Audition 0.3.x.
 
 ## Quick reference
 
@@ -91,7 +91,7 @@ the natural place.
 
 ## Native extensions (C, Rust, and Zig)
 
-audition cannot read native code, but it reports the one
+Audition cannot read native code, but it reports the one
 fact that decides its Ractor behavior. Ractor::UnsafeError
 ("ractor unsafe method called from not main ractor") is not
 an IsolationError: it means a compiled extension never
@@ -101,7 +101,7 @@ extension is C, Rust, or Zig. The `native-extension` check
 byte-scans every compiled file in the target (*.bundle on
 macOS, *.so elsewhere) for that import and warns when it is
 missing; an unbuilt checkout is scanned at the source level
-(ext/**) instead. A declared extension gets an info note: the
+instead, beside the build file that compiles it. A declared extension gets an info note: the
 declaration is the maintainer's assertion, not a proof, and
 only real calls from a Ractor (script and Rack probes, or the
 gem's own tests under Ractor.new) verify it.

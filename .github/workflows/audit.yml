@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   audition:
-    name: audition audits audition
+    name: Audition audits itself
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
