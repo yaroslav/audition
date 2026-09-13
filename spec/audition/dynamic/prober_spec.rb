@@ -102,6 +102,21 @@ RSpec.describe Audition::Dynamic::Prober do
       end
     end
 
+    it "pins the failing line from the Ractor backtrace" do
+      Dir.mktmpdir do |dir|
+        path = write(dir, "late_fail.rb", <<~RUBY)
+          x = [1, 2].sum
+          $boom = x
+        RUBY
+
+        result = prober.probe(mode: :script, path: path)
+
+        finding = result.findings.first
+        expect(finding.path).to eq(path)
+        expect(finding.line).to eq(2)
+      end
+    end
+
     it "passes a self-contained script" do
       Dir.mktmpdir do |dir|
         path = write(dir, "clean.rb", "x = [1, 2].sum\nraise unless x == 3\n")
@@ -159,6 +174,59 @@ RSpec.describe Audition::Dynamic::Prober do
       end
     end
 
+    it "catches state the boot plants on reopened core classes" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/reopener.rb", <<~RUBY)
+          class String
+            @audition_planted = {"k" => 1}
+          end
+          module Comparable
+            @@audition_legacy = true
+          end
+          module Reopener
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "reopener",
+          load_paths: [File.join(dir, "lib")]
+        )
+
+        messages = result.findings.map(&:message)
+        expect(messages.grep(/@audition_planted on String/))
+          .not_to be_empty
+        expect(messages.grep(/@@audition_legacy.* on Comparable/))
+          .not_to be_empty
+      end
+    end
+
+    it "names the blocker inside an unshareable constant" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/blockers.rb", <<~RUBY)
+          module Blockers
+            JUST_UNFROZEN = [1, 2]
+            DEEP = {"handler" => proc { 1 }}.freeze
+            LEAF = [["s".dup].freeze].freeze
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "blockers",
+          load_paths: [File.join(dir, "lib")]
+        )
+
+        messages = result.findings.map(&:message)
+        expect(messages.grep(/JUST_UNFROZEN.*just not frozen/))
+          .not_to be_empty
+        expect(messages.grep(/DEEP.*blocked by Proc inside/))
+          .not_to be_empty
+        expect(messages.grep(/LEAF.*blocked by unfrozen String inside/))
+          .not_to be_empty
+      end
+    end
+
     it "falls back to the single top-level lib file of the target" do
       Dir.mktmpdir do |dir|
         write(dir, "lib/active_thing.rb", <<~RUBY)
@@ -173,6 +241,28 @@ RSpec.describe Audition::Dynamic::Prober do
           mode: :require,
           feature: "activething",
           load_paths: [File.join(dir, "lib")],
+          root: dir
+        )
+
+        expect(result.raw["error"]).to be_nil
+        expect(result.passed).to be(true)
+      end
+    end
+
+    it "finds that fallback on a load path that is not lib" do
+      Dir.mktmpdir do |dir|
+        write(dir, "src/active_thing.rb", <<~RUBY)
+          # frozen_string_literal: true
+
+          module ActiveThing
+            VERSION = "1.0"
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "activething",
+          load_paths: [File.join(dir, "src")],
           root: dir
         )
 
@@ -224,6 +314,31 @@ RSpec.describe Audition::Dynamic::Prober do
         )
 
         expect(result.passed).to be(true)
+      end
+    end
+
+    it "reports a truncated constant sweep instead of staying silent" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/many_consts.rb", <<~RUBY)
+          module ManyConstsA; end
+          module ManyConstsB; end
+          module ManyConstsC; end
+          module ManyConstsD; end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "many_consts",
+          load_paths: [File.join(dir, "lib")],
+          max_constants: 2
+        )
+
+        expect(result.raw["truncated"]).to be(true)
+        expect(result.raw["scanned"]).to eq(2)
+        scan = result.findings.find { |f| f.check == "runtime-scan" }
+        expect(scan).not_to be_nil
+        expect(scan.severity).to eq(:warning)
+        expect(scan.message).to include("limit 2")
       end
     end
 
@@ -343,6 +458,54 @@ RSpec.describe Audition::Dynamic::Prober do
     end
   end
 
+  describe "rails probing" do
+    it "keeps the partial sweep when boot fails midway" do
+      Dir.mktmpdir do |dir|
+        environment = write(dir, "config/environment.rb", <<~RUBY)
+          module PartialApp
+            DIRTY = [1, 2]
+          end
+          raise "boot exploded after defining constants"
+        RUBY
+
+        result = prober.probe(
+          mode: :rails, environment: environment, root: dir
+        )
+
+        expect(result.passed).to be(false)
+        boot = result.findings.first
+        expect(boot.check).to eq("dynamic-rails")
+        expect(boot.message).to include("boot exploded")
+        expect(boot.why).to include("loaded before the failure")
+        expect(boot.path).to end_with("config/environment.rb")
+        expect(boot.line).to eq(4)
+        dirty = result.findings.find do |f|
+          f.message.include?("PartialApp::DIRTY")
+        end
+        expect(dirty).not_to be_nil
+        expect(dirty.check).to eq("runtime-unshareable-constant")
+        expect(dirty.dependency?).to be(false)
+      end
+    end
+
+    it "does not promise partial findings when nothing loaded" do
+      Dir.mktmpdir do |dir|
+        environment = write(dir, "config/environment.rb", <<~RUBY)
+          raise "dead on arrival"
+        RUBY
+
+        result = prober.probe(
+          mode: :rails, environment: environment, root: dir
+        )
+
+        expect(result.passed).to be(false)
+        boot = result.findings.first
+        expect(boot.message).to include("dead on arrival")
+        expect(boot.why).not_to include("loaded before the failure")
+      end
+    end
+  end
+
   describe "rack probing" do
     it "boots, serves, and hammers the app across Ractors" do
       Dir.mktmpdir do |dir|
@@ -373,7 +536,34 @@ RSpec.describe Audition::Dynamic::Prober do
         result = prober.probe(mode: :rack, config_ru: config_ru)
 
         expect(result.passed).to be(false)
-        expect(result.findings.first.severity).to eq(:error)
+        finding = result.findings.first
+        expect(finding.severity).to eq(:error)
+        expect(finding.path).to eq(config_ru)
+        expect(finding.line).to eq(1)
+      end
+    end
+
+    it "sweeps the constant graph the main-process boot defined" do
+      Dir.mktmpdir do |dir|
+        dir = File.realpath(dir)
+        config_ru = write(dir, "config.ru", <<~RUBY)
+          RACK_APP_STATE = [1, 2]
+          run ->(env) { [200, {}, ["ok"]] }
+        RUBY
+
+        result = prober.probe(
+          mode: :rack, config_ru: config_ru, root: dir
+        )
+
+        expect(result.passed).to be(false)
+        swept = result.findings.find do |f|
+          f.check == "runtime-unshareable-constant"
+        end
+        expect(swept).not_to be_nil
+        expect(swept.message).to include("RACK_APP_STATE")
+        expect(swept.path).to eq(config_ru)
+        expect(swept.line).to eq(1)
+        expect(swept.dependency?).to be(false)
       end
     end
   end

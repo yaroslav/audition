@@ -22,7 +22,7 @@ module Audition
     # Spawns the harness subprocess per probe mode, parses its JSON,
     # and converts observations into findings.
     class Prober
-      HARNESS = File.expand_path("harness.rb", __dir__)
+      HARNESS = File.expand_path("harness.rb", __dir__).freeze
 
       RUNTIME_WHY =
         "Observed on the live object graph after loading the " \
@@ -60,13 +60,13 @@ module Audition
 
       def probe_script(entry)
         path = entry[:path]
-        ractor = run("script_ractor", "path" => path)
+        ractor = run("script_ractor", {"path" => path})
         if ractor["ok"]
           return Result.new(mode: :script, raw: ractor,
             findings: [], passed: true)
         end
 
-        main = run("script_main", "path" => path)
+        main = run("script_main", {"path" => path})
         finding = script_finding(path, ractor, main)
         Result.new(mode: :script,
           raw: {"ractor" => ractor, "main" => main},
@@ -76,6 +76,7 @@ module Audition
       def script_finding(path, ractor, main)
         if main["ok"]
           error = describe(ractor)
+          site = failure_site(ractor, prefix: "#{path}:")
           Finding.new(
             check: "dynamic-script",
             severity: :error,
@@ -84,11 +85,12 @@ module Audition
                  "failed under Ractor.new; the static findings " \
                  "usually pinpoint the exact line.",
             fix: "Fix the static findings for this file, then " \
-                 "re-audition.",
+                 "re-run Audition.",
             path: path,
-            line: nil
+            line: site&.last
           )
         else
+          site = failure_site(main, prefix: "#{path}:")
           Finding.new(
             check: "dynamic-script",
             severity: :error,
@@ -97,7 +99,7 @@ module Audition
                  "Ractor, so Ractor-readiness cannot be assessed.",
             fix: "Make the script run standalone first.",
             path: path,
-            line: nil
+            line: site&.last
           )
         end
       end
@@ -105,38 +107,51 @@ module Audition
       def probe_require(entry)
         feature = entry[:feature]
         raw = run("require",
-          "feature" => feature,
-          "load_paths" => Array(entry[:load_paths]),
-          "root" => entry[:root],
-          "known_compiled" => Array(entry[:compiled_files]))
-        findings = runtime_findings(raw, feature)
+          {"feature" => feature,
+           "load_paths" => Array(entry[:load_paths]),
+           "root" => entry[:root],
+           "known_compiled" => Array(entry[:compiled_files]),
+           "max_constants" => entry[:max_constants]})
+        findings = runtime_findings(raw, feature,
+          root: entry[:root])
         Result.new(mode: :require, raw: raw, findings: findings,
           passed: own_clean?(findings))
       end
 
       def probe_rails(entry)
         raw = run("rails",
-          "environment" => entry[:environment],
-          "root" => entry[:root],
-          "known_compiled" => Array(entry[:compiled_files]))
+          {"environment" => entry[:environment],
+           "root" => entry[:root],
+           "known_compiled" => Array(entry[:compiled_files]),
+           "max_constants" => entry[:max_constants]},
+          root: entry[:root])
         boot = raw["boot"]
+        findings = runtime_findings(raw, entry[:environment],
+          root: entry[:root])
         if boot && !boot["ok"]
-          finding = Finding.new(
+          # The sweep of whatever loaded before the failure stays:
+          # a partial dynamic result beats none.
+          why = "Ractor-readiness cannot be fully assessed " \
+                "until the application boots."
+          if raw["scanned"].to_i.positive?
+            why += " Findings below cover what loaded before " \
+                   "the failure."
+          end
+          site = failure_site(boot, prefix: own_prefix(entry[:root]))
+          findings.unshift(Finding.new(
             check: "dynamic-rails",
             severity: :error,
             message: "Rails failed to boot: #{describe(boot)}",
-            why: "Ractor-readiness cannot be assessed until the " \
-                 "application boots.",
+            why: why,
             fix: "Boot the app (bin/rails runner 1) and fix " \
-                 "whatever breaks, then re-audition.",
-            path: entry[:environment],
-            line: nil
-          )
+                 "whatever breaks, then re-run Audition.",
+            path: site&.first || entry[:environment],
+            line: site&.last
+          ))
           return Result.new(mode: :rails, raw: raw,
-            findings: [finding], passed: false)
+            findings: findings, passed: false)
         end
 
-        findings = runtime_findings(raw, entry[:environment])
         Result.new(mode: :rails, raw: raw, findings: findings,
           passed: own_clean?(findings))
       end
@@ -150,10 +165,18 @@ module Audition
 
       def probe_rack(entry)
         config_ru = entry[:config_ru]
-        raw = run("rack", "config_ru" => config_ru)
-        findings = rack_findings(raw, config_ru)
+        root = entry[:root] || File.dirname(config_ru)
+        raw = run("rack",
+          {"config_ru" => config_ru,
+           "root" => root,
+           "known_compiled" => Array(entry[:compiled_files]),
+           "max_constants" => entry[:max_constants]},
+          root: root)
+        findings = rack_findings(raw, config_ru, root)
+        findings += runtime_findings(raw, config_ru, root: root) unless raw["error"]
         passed = raw.dig("ractor_boot_call", "ok") == true &&
-          raw.dig("concurrency", "failures").to_i.zero?
+          raw.dig("concurrency", "failures").to_i.zero? &&
+          own_clean?(findings)
         Result.new(mode: :rack, raw: raw, findings: findings,
           passed: passed)
       end
@@ -166,19 +189,28 @@ module Audition
 
       # -- findings builders ---------------------------------------
 
-      def runtime_findings(raw, label)
+      def runtime_findings(raw, label, root: nil)
         if raw["error"]
-          return [load_failure_finding(raw, label)]
+          return [load_failure_finding(raw, label, root)]
         end
 
         findings = []
         raw.fetch("unshareable_constants", []).each do |entry|
+          blocker = entry["blocker"]
+          detail =
+            if blocker.nil? || blocker == entry["class"]
+              ""
+            elsif entry["blocker_nested"]
+              " (blocked by #{blocker} inside)"
+            else
+              " (just not frozen)"
+            end
           findings << runtime_finding(
             entry, label,
             check: "runtime-unshareable-constant",
             severity: :error,
             message: "constant #{entry["const"]} holds an " \
-                     "unshareable #{entry["class"]}",
+                     "unshareable #{entry["class"]}#{detail}",
             why: "Reading it from a non-main Ractor raises " \
                  "Ractor::IsolationError. #{RUNTIME_WHY}",
             fix: "Freeze it deeply at definition time " \
@@ -207,6 +239,22 @@ module Audition
           next if entry["ruby"] || entry["known"]
 
           findings << native_finding(entry, label)
+        end
+        # A truncated sweep must never read as a clean one.
+        if raw["truncated"]
+          findings.unshift(Finding.new(
+            check: "runtime-scan",
+            severity: :warning,
+            message: "constant sweep truncated after " \
+                     "#{raw["scanned"]} constants " \
+                     "(limit #{raw["limit"]})",
+            why: "Constants beyond the limit were never probed, " \
+                 "so their absence from the findings proves " \
+                 "nothing.",
+            fix: "Raise the probe's max_constants and re-run.",
+            path: label,
+            line: nil
+          ))
         end
         findings
       end
@@ -292,7 +340,8 @@ module Audition
         )
       end
 
-      def load_failure_finding(raw, label)
+      def load_failure_finding(raw, label, root = nil)
+        site = failure_site(raw, prefix: own_prefix(root))
         Finding.new(
           check: "runtime-load",
           severity: :error,
@@ -300,14 +349,14 @@ module Audition
           why: "Ractor-readiness cannot be assessed until the " \
                "target loads.",
           fix: "Make `require` succeed on a bare Ruby first.",
-          path: label,
-          line: nil
+          path: site&.first || label,
+          line: site&.last
         )
       end
 
-      def rack_findings(raw, config_ru)
+      def rack_findings(raw, config_ru, root = nil)
         if raw.dig("ractor_boot_call", "ok")
-          return concurrency_findings(raw, config_ru)
+          return concurrency_findings(raw, config_ru, root)
         end
 
         if raw["rack_available"] == false
@@ -316,7 +365,7 @@ module Audition
             severity: :warning,
             message: "rack gem not available in the probe process",
             why: "The rack probe boots the app via Rack::Builder.",
-            fix: "Install rack next to audition and re-run.",
+            fix: "Install rack next to Audition and re-run.",
             path: config_ru,
             line: nil
           )]
@@ -332,6 +381,10 @@ module Audition
             "booting config.ru and serving one GET / inside a " \
             "Ractor failed."
           end
+        site = failure_site(raw["ractor_boot_call"],
+          prefix: own_prefix(root)) ||
+          failure_site({"error" => raw["main_boot_error"]},
+            prefix: own_prefix(root))
         [Finding.new(
           check: "dynamic-rack",
           severity: :error,
@@ -340,16 +393,18 @@ module Audition
           fix: "Remove global/class-level state touched during " \
                "boot and request handling; keep middleware config " \
                "frozen; open connections per-Ractor.",
-          path: config_ru,
-          line: nil
+          path: site&.first || config_ru,
+          line: site&.last
         )]
       end
 
-      def concurrency_findings(raw, config_ru)
+      def concurrency_findings(raw, config_ru, root = nil)
         stats = raw["concurrency"] || {}
         failures = stats["failures"].to_i
         return [] if failures.zero?
 
+        site = failure_site({"error" => stats["first_error"]},
+          prefix: own_prefix(root))
         [Finding.new(
           check: "dynamic-rack-concurrency",
           severity: :error,
@@ -361,9 +416,41 @@ module Audition
                "shared state races. #{RUNTIME_WHY}",
           fix: "Look for process-global state touched during " \
                "request handling and boot.",
-          path: config_ru,
-          line: nil
+          path: site&.first || config_ru,
+          line: site&.last
         )]
+      end
+
+      # A backtrace frame inside the target names the failing
+      # line; frames outside it stay unattributed rather than
+      # pinning a finding to a dependency's file.
+      BACKTRACE_FRAME = /\A(.+?):(\d+):in /
+
+      def failure_site(hash, prefix:)
+        prefixes = Array(prefix)
+        return nil if prefixes.empty? || !hash.is_a?(Hash)
+
+        error = hash["error"].is_a?(Hash) ? hash["error"] : hash
+        frame = Array(error["backtrace"]).find do |f|
+          f.is_a?(String) && prefixes.any? { |p| f.start_with?(p) }
+        end
+        match = frame&.match(BACKTRACE_FRAME)
+        match && [match[1], Integer(match[2], 10)]
+      end
+
+      # require realpaths frames while eval keeps paths as given,
+      # so a symlinked root (macOS /var) must match both spellings.
+      def own_prefix(root)
+        return nil if root.nil?
+
+        [root + File::SEPARATOR,
+          realpath(root) + File::SEPARATOR].uniq
+      end
+
+      def realpath(path)
+        File.realpath(path)
+      rescue SystemCallError
+        path
       end
 
       def describe(hash)
@@ -378,8 +465,8 @@ module Audition
       # Harness output can carry arbitrary target bytes; force
       # valid UTF-8 before any string work or a binary exception
       # message crashes the whole run.
-      def run(mode, payload = {})
-        out, err, timed_out = execute(mode, payload)
+      def run(mode, payload = {}, root: nil)
+        out, err, timed_out = execute(mode, payload, root: root)
         out = sanitize(out)
         err = sanitize(err)
         if timed_out
@@ -405,9 +492,28 @@ module Audition
       # child the target spawned inherits our pipes and would
       # otherwise hold the read until it exits, defeating the
       # timeout and leaving orphans behind.
-      def execute(mode, payload)
+      def execute(mode, payload, root: nil)
         cmd = [@ruby, "-W0", HARNESS, mode]
-        Open3.popen3(*cmd, pgroup: true) do |stdin, stdout, stderr, wait|
+        # An app boots against its own bundle: the subprocess runs
+        # from the target root with the target's Gemfile. When
+        # Audition itself runs under bundle exec, the inherited
+        # Bundler environment (RUBYOPT's -rbundler/setup above all)
+        # would activate Audition's bundle inside the child before
+        # the harness starts, so it is scrubbed first.
+        env = {}
+        opts = {pgroup: true}
+        if root && File.directory?(root)
+          opts[:chdir] = root
+          gemfile = File.join(root, "Gemfile")
+          if File.file?(gemfile)
+            ENV.each_key do |key|
+              env[key] = nil if key.start_with?("BUNDLE") ||
+                %w[RUBYOPT RUBYLIB].include?(key)
+            end
+            env["BUNDLE_GEMFILE"] = gemfile
+          end
+        end
+        Open3.popen3(env, *cmd, **opts) do |stdin, stdout, stderr, wait|
           stdin.write(JSON.generate(payload))
           stdin.close
           out_reader = reader(stdout)
