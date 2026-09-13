@@ -12,6 +12,12 @@ module Audition
       vendor node_modules tmp log coverage pkg .git .bundle
     ].freeze
 
+    # Directories holding the target's tests rather than the code
+    # a production boot loads. The default; `test_dirs` in
+    # .audition.yml replaces it for a project that files them
+    # elsewhere.
+    TEST_DIRS = %w[test spec features].freeze
+
     # Cargo and Zig build output: full of .so/.dylib artifacts that
     # are not the extension `require` loads.
     BUILD_DIRS = %w[target zig-out].freeze
@@ -19,6 +25,11 @@ module Audition
     # What Ruby loads as a native extension (RbConfig DLEXT is
     # "bundle" on macOS, "so" everywhere else, Windows included).
     COMPILED = "*.{bundle,so}"
+
+    # Generated type stubs. The extension is the convention; where
+    # the generator writes them is not, so they are found by
+    # extension anywhere in the tree.
+    STUBS = "*.rbi"
 
     # @return [Symbol] one of `:script`, `:gem`, `:rack`, `:rails`,
     #   `:directory`, `:bundle`
@@ -33,6 +44,10 @@ module Audition
     # @return [Array<String>] compiled extension files (.bundle/.so)
     #   shipped with the target; empty for scripts and file lists
     attr_reader :compiled_files
+
+    # @return [Array<String>] generated type stubs (.rbi) found
+    #   anywhere in the target's tree
+    attr_reader :stub_files
 
     # @return [Hash, nil] dynamic probe entry (`:mode` plus
     #   mode-specific keys), nil for static-only targets
@@ -75,7 +90,8 @@ module Audition
         type: :files,
         root: Dir.pwd,
         ruby_files: paths,
-        entry: nil
+        entry: nil,
+        stub_files: stubs(Dir.pwd)
       )
     end
 
@@ -96,8 +112,24 @@ module Audition
         type: :script,
         root: File.dirname(path),
         ruby_files: [path],
-        entry: {mode: :script, path: path}
+        # A file inside a Rails root cannot run standalone; the
+        # script probe would report a misleading boot failure, so
+        # such files stay static-only.
+        entry: rails_member?(path) ? nil : {mode: :script, path: path},
+        stub_files: stubs(File.dirname(path))
       )
+    end
+
+    def self.rails_member?(path)
+      dir = File.dirname(File.expand_path(path))
+      until dir == (parent = File.dirname(dir))
+        return true if File.file?(
+          File.join(dir, "config", "application.rb")
+        )
+
+        dir = parent
+      end
+      false
     end
 
     def self.from_directory(dir)
@@ -117,7 +149,8 @@ module Audition
           root: dir,
           ruby_files: glob(dir),
           entry: nil,
-          compiled_files: compiled(dir)
+          compiled_files: compiled(dir),
+          stub_files: stubs(dir)
         )
       end
     end
@@ -131,16 +164,21 @@ module Audition
           glob(File.join(spec.full_gem_path, rp))
         end,
         entry: {mode: :require, feature: name,
+                load_paths: spec.full_require_paths,
                 root: spec.full_gem_path},
-        compiled_files: compiled_for(spec)
+        compiled_files: compiled_for(spec),
+        stub_files: stubs(spec.full_gem_path)
       )
     rescue Gem::MissingSpecError
       raise Error,
         "#{name} is not a file, directory, or installed gem"
     end
 
+    # An app's own Ruby is not confined to app/lib/config: local
+    # gems, engines and tests boot into the same process, so the
+    # whole root is scanned.
     def self.rails_target(dir)
-      files = %w[app lib config].flat_map { |d| glob(File.join(dir, d)) }
+      files = glob(dir)
       files << File.join(dir, "config.ru")
       new(
         type: :rails,
@@ -151,7 +189,8 @@ module Audition
           environment: File.join(dir, "config", "environment.rb"),
           root: dir
         },
-        compiled_files: compiled(dir)
+        compiled_files: compiled(dir),
+        stub_files: stubs(dir)
       )
     end
 
@@ -160,24 +199,31 @@ module Audition
         type: :rack,
         root: dir,
         ruby_files: [config_ru] + glob(dir),
-        entry: {mode: :rack, config_ru: config_ru},
-        compiled_files: compiled(dir)
+        entry: {mode: :rack, config_ru: config_ru, root: dir},
+        compiled_files: compiled(dir),
+        stub_files: stubs(dir)
       )
     end
 
+    # Reading require_paths off the gemspec would mean evaluating
+    # it, which the static pass never does; `lib` is the packaging
+    # default, and a gem that keeps its code elsewhere falls back to
+    # the whole checkout rather than scanning nothing.
     def self.gem_dir_target(dir, gemspec)
       lib = File.join(dir, "lib")
+      paths = File.directory?(lib) ? [lib] : [dir]
       new(
         type: :gem,
         root: dir,
-        ruby_files: glob(lib),
+        ruby_files: paths.flat_map { |path| glob(path) },
         entry: {
           mode: :require,
           feature: File.basename(gemspec, ".gemspec"),
-          load_paths: [lib],
+          load_paths: paths,
           root: dir
         },
-        compiled_files: compiled(dir)
+        compiled_files: compiled(dir),
+        stub_files: stubs(dir)
       )
     end
 
@@ -197,6 +243,14 @@ module Audition
         parts = relative.split("/")
         parts.any? { |p| skip.include?(p) || p.start_with?(".") }
       end.sort
+    end
+
+    # Generated type stubs anywhere under a directory.
+    #
+    # @param dir [String]
+    # @return [Array<String>]
+    def self.stubs(dir)
+      glob(dir, STUBS)
     end
 
     # macOS debug-symbol bundles (x.bundle.dSYM/...) carry a file
@@ -222,15 +276,30 @@ module Audition
 
     private_class_method :from_file, :from_directory, :from_gem_name,
       :rails_target, :rack_target, :gem_dir_target,
-      :glob, :compiled, :normalize
+      :rails_member?, :glob, :compiled, :normalize
 
     def initialize(type:, root:, ruby_files:, entry:,
-      compiled_files: [])
+      compiled_files: [], stub_files: [])
       @type = type
       @root = root
       @ruby_files = ruby_files
       @entry = entry
       @compiled_files = compiled_files
+      @stub_files = stub_files
+    end
+
+    # Whether a path is test/spec code rather than code the
+    # production boot loads.
+    #
+    # @param path [String] absolute or root-relative
+    # @param dirs [Array<String>] directory names that hold tests
+    # @return [Boolean]
+    def test_file?(path, dirs: TEST_DIRS)
+      relative = File.expand_path(path, root)
+        .delete_prefix("#{root}/")
+      parts = relative.split("/")
+      parts[0..-2].any? { |p| dirs.include?(p) } ||
+        parts.last.to_s.end_with?("_test.rb", "_spec.rb")
     end
   end
 end

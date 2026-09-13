@@ -22,9 +22,9 @@ module Audition
       INIT = /\bInit_\w+\s*\(/
       SOURCES = "*.{c,cc,cpp,cxx,m,mm,h,hpp,rs,zig}"
       BUILD_FILES = %w[Cargo.toml build.zig extconf.rb].freeze
-      # Harness crates and test trees under ext/ are not compiled
-      # into the extension; a fuzz target that links the VM itself
-      # may call rb_ext_ractor_safe without the extension doing so.
+      # Harness crates and test trees are not compiled into the
+      # extension; a fuzz target that links the VM itself may call
+      # rb_ext_ractor_safe without the extension doing so.
       HARNESS_DIRS = %w[fuzz benches tests examples test spec].freeze
 
       SILENT_WHY =
@@ -51,7 +51,7 @@ module Audition
       DECLARED_WHY =
         "rb_ext_ractor_safe(true) is the maintainer's assertion " \
         "that the extension keeps no process-global mutable state; " \
-        "Ruby does not verify it and neither can audition. Its " \
+        "Ruby does not verify it and neither can Audition. Its " \
         "methods run from any Ractor, in parallel, on the strength " \
         "of that assertion alone."
       DECLARED_FIX =
@@ -91,12 +91,16 @@ module Audition
         nil
       end
 
-      # One finding per extension directory (ext/<name>), anchored
+      # One finding per extension directory, anchored
       # at the declaration when there is one, else at Init_* or the
       # build file, where the declaration belongs.
       def source_finding(dir, root)
         sources = sources_under(dir)
-        label = dir.delete_prefix("#{root}/")
+        label = if dir == root
+          File.basename(root)
+        else
+          dir.delete_prefix("#{root}/")
+        end
         path, line = locate(sources, DECLARATION)
         if path
           return finding(:info, path, line,
@@ -111,18 +115,26 @@ module Audition
           "safety", SILENT_WHY + SOURCE_TAIL, SILENT_FIX)
       end
 
-      # ext/<name> directories holding native sources; ext/ itself
-      # when the sources sit directly in it.
+      # Directories holding native sources, found by the build file
+      # that compiles them rather than by convention: a gem is free
+      # to put its extension anywhere. A manifest above another one
+      # is dropped, so a workspace does not report the sources of
+      # the crates under it a second time.
       def extension_dirs(root)
-        ext = File.join(root, "ext")
-        return [] unless File.directory?(ext)
-
-        dirs = Dir[File.join(ext, "*")].sort.select do |dir|
-          File.directory?(dir) && !skipped?(File.basename(dir)) &&
-            sources_under(dir).any?
+        dirs = build_dirs(root).select { |dir| sources_under(dir).any? }
+        dirs.reject do |dir|
+          dirs.any? { |other| other.start_with?("#{dir}/") }
         end
-        dirs << ext if Dir[File.join(ext, SOURCES)].any?
-        dirs
+      end
+
+      def build_dirs(root)
+        pattern = "{#{BUILD_FILES.join(",")}}"
+        Dir[File.join(root, "**", pattern)].filter_map do |path|
+          relative = path.delete_prefix("#{root}/").split("/")
+          next if relative[0..-2].any? { |part| skipped?(part) }
+
+          File.dirname(path)
+        end.uniq.sort
       end
 
       def sources_under(dir)

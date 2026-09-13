@@ -19,6 +19,21 @@ RSpec.describe Audition::Target do
     end
   end
 
+  it "keeps a file inside a Rails root static-only" do
+    in_tmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "config"))
+      FileUtils.mkdir_p(File.join(dir, "app/models"))
+      File.write(File.join(dir, "config/application.rb"), "\n")
+      path = File.join(dir, "app/models/user.rb")
+      File.write(path, "class User; end\n")
+
+      target = described_class.detect(path)
+      expect(target.type).to eq(:script)
+      expect(target.ruby_files).to eq([path])
+      expect(target.entry).to be_nil
+    end
+  end
+
   it "detects a directory with config.ru as a rack app" do
     in_tmpdir do |dir|
       File.write(File.join(dir, "config.ru"), "run ->(e) {}\n")
@@ -30,7 +45,8 @@ RSpec.describe Audition::Target do
         File.join(dir, "config.ru"), File.join(dir, "app.rb")
       )
       expect(target.entry)
-        .to eq(mode: :rack, config_ru: File.join(dir, "config.ru"))
+        .to eq(mode: :rack, config_ru: File.join(dir, "config.ru"),
+          root: dir)
     end
   end
 
@@ -54,6 +70,68 @@ RSpec.describe Audition::Target do
     end
   end
 
+  it "scans a Rails root beyond app, lib, and config" do
+    in_tmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "config"))
+      FileUtils.mkdir_p(File.join(dir, "gems/toolkit/lib"))
+      FileUtils.mkdir_p(File.join(dir, "vendor/bundle"))
+      File.write(File.join(dir, "config/application.rb"), "module A;end\n")
+      File.write(File.join(dir, "gems/toolkit/lib/toolkit.rb"),
+        "module Toolkit;end\n")
+      File.write(File.join(dir, "vendor/bundle/dep.rb"), "module D;end\n")
+
+      target = described_class.detect(dir)
+      expect(target.ruby_files)
+        .to include(File.join(dir, "gems/toolkit/lib/toolkit.rb"))
+      expect(target.ruby_files)
+        .not_to include(File.join(dir, "vendor/bundle/dep.rb"))
+    end
+  end
+
+  describe "#test_file?" do
+    it "recognizes test directories and suffixed files" do
+      in_tmpdir do |dir|
+        File.write(File.join(dir, "thing.rb"), "X = 1\n")
+        target = described_class.detect(dir)
+
+        expect(target.test_file?(File.join(dir, "spec/a_spec.rb")))
+          .to be(true)
+        expect(target.test_file?(File.join(dir, "test/models/a.rb")))
+          .to be(true)
+        expect(target.test_file?(File.join(dir, "features/x.rb")))
+          .to be(true)
+        expect(target.test_file?(File.join(dir, "lib/a_test.rb")))
+          .to be(true)
+        expect(target.test_file?(File.join(dir, "app/models/a.rb")))
+          .to be(false)
+        expect(target.test_file?(File.join(dir, "lib/testing.rb")))
+          .to be(false)
+      end
+    end
+
+    it "takes the directory names it is given" do
+      in_tmpdir do |dir|
+        File.write(File.join(dir, "thing.rb"), "X = 1\n")
+        target = described_class.detect(dir)
+
+        expect(target.test_file?(File.join(dir, "qa/a.rb"),
+          dirs: %w[qa])).to be(true)
+        expect(target.test_file?(File.join(dir, "spec/a.rb"),
+          dirs: %w[qa])).to be(false)
+      end
+    end
+
+    it "matches nested test directories inside engines" do
+      in_tmpdir do |dir|
+        File.write(File.join(dir, "thing.rb"), "X = 1\n")
+        target = described_class.detect(dir)
+
+        path = File.join(dir, "gems/toolkit/spec/a.rb")
+        expect(target.test_file?(path)).to be(true)
+      end
+    end
+  end
+
   it "detects a directory with a gemspec as a gem" do
     in_tmpdir do |dir|
       FileUtils.mkdir_p(File.join(dir, "lib"))
@@ -67,6 +145,36 @@ RSpec.describe Audition::Target do
         feature: "cool_gem",
         load_paths: [File.join(dir, "lib")],
         root: dir
+      )
+    end
+  end
+
+  it "falls back to the whole checkout when a gem has no lib" do
+    in_tmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "src"))
+      File.write(File.join(dir, "cool_gem.gemspec"), "")
+      File.write(File.join(dir, "src/cool_gem.rb"), "module CoolGem;end\n")
+
+      target = described_class.detect(dir)
+      expect(target.ruby_files)
+        .to eq([File.join(dir, "src/cool_gem.rb")])
+      expect(target.entry[:load_paths]).to eq([dir])
+    end
+  end
+
+  it "finds type stubs wherever the generator wrote them" do
+    in_tmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "types/gems"))
+      FileUtils.mkdir_p(File.join(dir, "vendor/types"))
+      File.write(File.join(dir, "types/gems/kit@1.0.0.rbi"), "\n")
+      File.write(File.join(dir, "top.rbi"), "\n")
+      File.write(File.join(dir, "vendor/types/dep.rbi"), "\n")
+      File.write(File.join(dir, "thing.rb"), "X = 1\n")
+
+      target = described_class.detect(dir)
+      expect(target.stub_files).to contain_exactly(
+        File.join(dir, "types/gems/kit@1.0.0.rbi"),
+        File.join(dir, "top.rbi")
       )
     end
   end

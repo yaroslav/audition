@@ -141,6 +141,48 @@ RSpec.describe Audition::Static::NativeExtensions do
       expect(analyze(dir)).to eq([])
     end
   end
+  it "finds an extension the gem did not put under ext" do
+    gem_dir do |dir|
+      native = File.join(dir, "native/cool_gem")
+      FileUtils.mkdir_p(native)
+      File.write(File.join(native, "extconf.rb"), "require \"mkmf\"\n")
+      File.write(File.join(native, "cool_gem.c"),
+        "void\nInit_cool_gem(void)\n{\n}\n")
+
+      findings = analyze(dir)
+
+      expect(findings.map(&:severity)).to eq([:warning])
+      expect(findings.first.message).to include("native/cool_gem")
+    end
+  end
+
+  it "names the checkout when the build file sits at the root" do
+    gem_dir do |dir|
+      File.write(File.join(dir, "extconf.rb"), "require \"mkmf\"\n")
+      File.write(File.join(dir, "cool_gem.c"),
+        "void\nInit_cool_gem(void)\n{\n}\n")
+
+      findings = analyze(dir)
+
+      expect(findings.first.message).to include(File.basename(dir))
+    end
+  end
+
+  it "reports a crate under a workspace manifest once" do
+    gem_dir do |dir|
+      ext = File.join(dir, "ext/cool_gem")
+      FileUtils.mkdir_p(File.join(ext, "src"))
+      File.write(File.join(dir, "Cargo.toml"), "[workspace]\n")
+      File.write(File.join(ext, "Cargo.toml"), "[package]\n")
+      File.write(File.join(ext, "src/lib.rs"),
+        "#[magnus::init]\nfn init() {}\n")
+
+      findings = analyze(dir)
+
+      expect(findings.map(&:path)).to eq([File.join(ext, "Cargo.toml")])
+    end
+  end
+
   it "ignores fuzz, bench, and test harness sources" do
     gem_dir do |dir|
       ext = File.join(dir, "ext/cool_gem")
