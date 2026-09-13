@@ -81,7 +81,10 @@ module Audition
         values = collector.values
         kinds = values.map { |v| classifier.classify(v) }
         flagged = kinds.reject do |k|
-          %i[shareable unknown].include?(k)
+          # A magic comment cannot fix opaque values, so they
+          # must not veto one either.
+          %i[shareable unknown instance_new opaque_call
+            shallow_opaque].include?(k)
         end
         scv_ok = values.any? &&
           values.all? { |value| deep_literal?(value, classifier) }
