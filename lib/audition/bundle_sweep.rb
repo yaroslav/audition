@@ -31,10 +31,10 @@ module Audition
 
     # Audits every locked gem and ranks the results, worst first.
     #
-    # @param progress [Proc, nil] called with (row, done, total)
-    #   as each gem finishes
+    # @param progress [Progress] named per gem as each finishes,
+    #   which is the only unit a sweep has
     # @return [Array<Row>]
-    def rows(progress: nil)
+    def rows(progress: Progress::SILENT)
       gems = locked_gems
       queue = Thread::Queue.new
       gems.each { |g| queue << g }
@@ -42,17 +42,19 @@ module Audition
 
       collected = []
       mutex = Thread::Mutex.new
-      @concurrency.times.map do
-        Thread.new do
-          while (name, version = queue.pop)
-            row = audit_gem(name, version)
-            mutex.synchronize do
-              collected << row
-              progress&.call(row, collected.size, gems.size)
+      progress.phase("sweep", total: gems.size, unit: "gems") do
+        @concurrency.times.map do
+          Thread.new do
+            while (name, version = queue.pop)
+              row = audit_gem(name, version)
+              mutex.synchronize do
+                collected << row
+                progress.item(row.name)
+              end
             end
           end
-        end
-      end.each(&:join)
+        end.each(&:join)
+      end
 
       collected.sort_by do |row|
         [VERDICT_ORDER.fetch(row.verdict), -row.errors, row.name]
@@ -115,8 +117,10 @@ module Audition
         ruby_files: spec.require_paths.flat_map do |rp|
           ruby_files_under(File.join(root, rp))
         end,
-        entry: {mode: :require, feature: spec.name, root: root},
-        compiled_files: Target.compiled_for(spec)
+        entry: {mode: :require, feature: spec.name,
+                load_paths: spec.full_require_paths, root: root},
+        compiled_files: Target.compiled_for(spec),
+        stub_files: Target.stubs(root)
       )
     end
 
@@ -148,7 +152,12 @@ module Audition
       end
       per_file = Static::Analyzer.new
         .analyze_paths(files, workers: 1)
-      per_file + Static::GraphAudit.new.analyze_paths(files) +
+      gem_calls = Static::GemCalls
+        .new(root: target.root, stubs: target.stub_files)
+        .analyze_paths(files)
+      per_file + gem_calls + Static::GraphAudit.new
+        .analyze_paths(files, constant_findings: per_file + gem_calls,
+          workers: 1) +
         Static::NativeExtensions.new.analyze(target,
           compiled_files: compiled)
     end

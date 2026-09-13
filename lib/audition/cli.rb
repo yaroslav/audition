@@ -34,7 +34,7 @@ module Audition
 
       args = options[:args]
       if args.empty?
-        @stderr.puts(USAGE)
+        @stderr.puts(style(options, io: @stderr).dim(USAGE))
         return 2
       end
 
@@ -53,7 +53,7 @@ module Audition
         audit(target, options)
       end
     rescue Error => e
-      @stderr.puts("audition: #{e.message}")
+      complain(e.message, options)
       2
     end
 
@@ -65,7 +65,7 @@ module Audition
         dynamic_only: false, fix: false, unsafe: false,
         dry_run: false, capabilities: false, plain: false,
         timeout: 30, write_baseline: false, no_baseline: false,
-        deps: false, explicit: []
+        deps: false, progress: nil, workers: nil, explicit: []
       }
       parser = OptionParser.new do |o|
         o.banner = USAGE
@@ -129,8 +129,19 @@ module Audition
           options[:timeout] = v
           options[:explicit] << :timeout
         end
+        o.on("-j", "--workers COUNT", Integer,
+          "scan Ractors (default: cores, capped by " \
+          "RUBY_MAX_CPU)") do |v|
+          options[:workers] = v
+          options[:explicit] << :workers
+        end
         o.on("--plain", "disable colors and hyperlinks") do
           options[:plain] = true
+        end
+        o.on("--[no-]progress",
+          "narrate scan phases on stderr (default: on for a " \
+          "large tree on a terminal)") do |v|
+          options[:progress] = v
         end
         o.on("-v", "--version") do
           @stdout.puts(VERSION)
@@ -144,9 +155,17 @@ module Audition
       options[:args] = parser.parse(argv)
       options
     rescue OptionParser::ParseError => e
-      @stderr.puts("audition: #{e.message}")
-      @stderr.puts(USAGE)
+      complain(e.message)
+      @stderr.puts(style(nil, io: @stderr).dim(USAGE))
       2
+    end
+
+    def complain(message, options = nil)
+      s = style(options, io: @stderr)
+      @stderr.puts(
+        "#{s.red(s.glyph(:error))} #{s.bold("Audition")}: " \
+        "#{message}"
+      )
     end
 
     def audit(target, options)
@@ -158,7 +177,7 @@ module Audition
       directives = Directives.new
       findings = []
       unless options[:dynamic_only]
-        findings = filter(static_findings(target, config),
+        findings = filter(static_findings(target, config, options),
           directives, config)
         findings = run_fix(target, findings, options) if options[:fix]
       end
@@ -175,9 +194,11 @@ module Audition
 
       if options[:write_baseline]
         recorded = Baseline.write(target.root, all)
+        s = style(options)
         @stdout.puts(
-          "baseline written: #{recorded} finding(s) recorded in " \
-          "#{Baseline.path_for(target.root)}"
+          "#{s.green(s.glyph(:pass))} baseline written: " \
+          "#{s.bold("#{recorded} finding(s)")} recorded in " \
+          "#{s.cyan(Baseline.path_for(target.root))}"
         )
         return 0
       end
@@ -239,7 +260,10 @@ module Audition
         "#{s.red("#{introduced.size} introduced")}"
       )
       introduced.each do |f|
-        @stdout.puts("    + #{f.message} (#{f.location})")
+        @stdout.puts(
+          "    #{s.red("+")} #{f.message} " \
+          "#{s.cyan("(#{f.location})")}"
+        )
       end
     end
 
@@ -275,17 +299,55 @@ module Audition
       baseline.filter(findings, root: target.root)
     end
 
-    def static_findings(target, config)
+    def static_findings(target, config, options)
       files = target.ruby_files.reject do |file|
         config.excluded?(file.delete_prefix("#{target.root}/"))
       end
       compiled = target.compiled_files.reject do |file|
         config.excluded?(file.delete_prefix("#{target.root}/"))
       end
-      per_file = Static::Analyzer.new.analyze_paths(files)
-      per_file + Static::GraphAudit.new.analyze_paths(files) +
+      stubs = target.stub_files.reject do |file|
+        config.excluded?(file.delete_prefix("#{target.root}/"))
+      end
+      progress = Progress.for(units: files.size,
+        wanted: options[:progress], format: options[:format],
+        io: @stderr, style: options[:plain] ? plain_style : nil)
+      scan(target, files, stubs, compiled, progress,
+        workers: options[:workers]).map do |f|
+        if target.test_file?(f.path, dirs: config.test_dirs)
+          f.with(test: true)
+        else
+          f
+        end
+      end
+    end
+
+    # Phases are named for what a waiting reader wants to know;
+    # progress shares stderr with fix chatter, for the same reason.
+    def scan(target, files, stubs, compiled, progress, workers: nil)
+      progress.phase("learning", total: files.size + stubs.size) do |p|
+        Static::Checks::UnshareableReads.learn(files + stubs,
+          progress: p)
+        Static::Checks::DependencyClassState.learn(stubs)
+      end
+      per_file = progress.phase("checking", total: files.size) do |p|
+        Static::Analyzer.new.analyze_paths(files, workers: workers,
+          progress: p)
+      end
+      gem_calls = progress.phase("gem calls") do |p|
+        Static::GemCalls.new(root: target.root, stubs: stubs)
+          .analyze_paths(files, progress: p)
+      end
+      graph = progress.phase("graph") do |p|
+        Static::GraphAudit.new.analyze_paths(files,
+          constant_findings: per_file + gem_calls,
+          workers: workers, progress: p)
+      end
+      per_file + gem_calls + graph +
         Static::NativeExtensions.new.analyze(target,
           compiled_files: compiled)
+    ensure
+      progress.finish
     end
 
     # Fix chatter goes to stderr: stdout carries the report, which
@@ -299,16 +361,19 @@ module Audition
 
       applied = fixer.apply(findings)
       total = applied.values.sum
+      s = style(options, io: @stderr)
       if total.zero?
-        @stderr.puts("nothing to fix")
+        @stderr.puts(s.dim("nothing to fix"))
         return findings
       end
 
       @stderr.puts(
-        "fixed #{total} finding(s) in #{applied.size} file(s)"
+        "#{s.cyan(s.glyph(:fix))} #{s.green("fixed #{total} " \
+        "finding(s)")} in #{s.bold("#{applied.size} file(s)")}"
       )
-      filter(static_findings(target, Config.load(target.root)),
-        Directives.new, Config.load(target.root))
+      config = Config.load(target.root)
+      filter(static_findings(target, config, options),
+        Directives.new, config)
     end
 
     def render_preview(previews, options)
@@ -316,7 +381,7 @@ module Audition
       previews.each do |preview|
         @stderr.puts(s.bold(preview[:path]))
         preview[:hunks].each do |hunk|
-          @stderr.puts("  @ line #{hunk[:line]}")
+          @stderr.puts(s.cyan("  @ line #{hunk[:line]}"))
           hunk[:old].each_line do |line|
             @stderr.puts(s.red("  - #{line.chomp}"))
           end
@@ -325,7 +390,7 @@ module Audition
           end
         end
       end
-      @stderr.puts("dry run: no files were changed")
+      @stderr.puts(s.dim("dry run: no files were changed"))
     end
 
     def prober(options)
@@ -356,26 +421,32 @@ module Audition
 
       File.open(path, "a") { |f| f.puts(markdown) }
     rescue SystemCallError => e
-      @stderr.puts(
-        "audition: cannot write step summary: #{e.message}"
-      )
+      complain("cannot write step summary: #{e.message}")
     end
 
+    # Diagnostics can precede option parsing, so --plain is
+    # honored only once there is something to honor it from.
     def style(options, io: @stdout)
-      if options[:plain]
-        Report::Style.new(color: false, hyperlinks: false)
+      if options&.fetch(:plain, false)
+        plain_style
       else
         Report::Style.detect(io: io)
       end
+    end
+
+    def plain_style
+      Report::Style.new(color: false, hyperlinks: false)
     end
 
     def exit_code(report, options)
       return 0 if options[:fail_on] == :never
 
       threshold = SEVERITIES.fetch(options[:fail_on])
+      # Test findings never load in a production boot; they are
+      # reported but do not fail the run, matching the verdict.
       failed =
         report.findings.any? do |f|
-          f.severity_rank >= threshold
+          f.severity_rank >= threshold && !f.test?
         end || report.dynamic_results.any? { |r| !r.passed }
       failed ? 1 : 0
     end
@@ -391,28 +462,39 @@ module Audition
       Target.detect(lockfile)
     end
 
-    VERDICT_CELLS = {
-      :not_ready => "not ready", :blocked => "blocked",
-      :risky => "risky", :ready => "ready", nil => "-"
-    }.freeze
-
     def sweep(target, options)
       sweeper = BundleSweep.new(
         lockfile: target.entry[:lockfile],
         static_only: options[:static_only],
         timeout: options[:timeout]
       )
-      rows = sweeper.rows(progress: sweep_progress)
-
-      case options[:format]
-      when :json then emit_sweep_json(rows)
-      when :github then emit_sweep_github(rows)
-      else emit_sweep_table(rows, options)
-      end
+      rows = sweep_rows(sweeper, options)
+      emit_sweep(Report::Sweep.new(rows, style(options)), options)
       return 0 if options[:fail_on] == :never
 
       threshold = SEVERITIES.fetch(options[:fail_on])
       (rows.any? { |r| row_failed?(r, threshold) }) ? 1 : 0
+    end
+
+    # No unit count: every gem is a scan of its own, so even a
+    # short lockfile runs long enough to narrate.
+    def sweep_rows(sweeper, options)
+      progress = Progress.for(wanted: options[:progress],
+        format: options[:format], io: @stderr,
+        style: options[:plain] ? plain_style : nil)
+      sweeper.rows(progress: progress)
+    ensure
+      progress.finish
+    end
+
+    def emit_sweep(sweep, options)
+      case options[:format]
+      when :json then @stdout.puts(sweep.json)
+      when :github
+        @stdout.puts(sweep.annotations)
+        append_step_summary(sweep.markdown)
+      else @stdout.puts(sweep.render(**table_opts(options)))
+      end
     end
 
     # Same contract as a direct audit: a row fails when it carries
@@ -424,14 +506,6 @@ module Audition
       hits += row.warnings if threshold <= SEVERITIES[:warning]
       hits += row.infos if threshold <= SEVERITIES[:info]
       hits.positive?
-    end
-
-    def sweep_progress
-      return nil unless @stderr.respond_to?(:tty?) && @stderr.tty?
-
-      lambda do |row, done, total|
-        @stderr.puts("audited #{row.name} (#{done}/#{total})")
-      end
     end
 
     # Cells arrive preformatted: coercion would render a version
@@ -446,116 +520,29 @@ module Audition
       }
     end
 
-    def emit_sweep_table(rows, options)
-      ready = rows.count { |r| r.verdict == :ready }
-      table = rows.map do |r|
-        {
-          "gem" => r.name,
-          "version" => r.version,
-          "verdict" => VERDICT_CELLS.fetch(r.verdict),
-          "errors" => r.errors,
-          "dep errors" => r.dep_errors,
-          "warnings" => r.warnings,
-          "fixable" => r.fixable,
-          "status" => r.status
-        }
-      end
-      @stdout.puts(TableTennis.new(
-        table, zebra: true, **table_opts(options)
-      ).to_s)
-      @stdout.puts(
-        "#{ready} of #{rows.size} gems ractor-ready"
-      )
-    end
-
-    # Sweep rows carry no file or line, so the annotations land on
-    # the run summary rather than a diff; the markdown table goes
-    # to the job summary page when Actions provides one.
-    def emit_sweep_github(rows)
-      ready = rows.count { |r| r.verdict == :ready }
-      rows.each do |row|
-        level = sweep_annotation_level(row)
-        next unless level
-
-        @stdout.puts(
-          "::#{level} title=audition::gem #{row.name} " \
-          "#{row.version}: #{row.errors} errors, " \
-          "#{row.dep_errors} dependency errors, " \
-          "#{row.warnings} warnings " \
-          "(#{VERDICT_CELLS.fetch(row.verdict)})"
-        )
-      end
-      @stdout.puts("#{ready} of #{rows.size} gems ractor-ready")
-      append_step_summary(sweep_summary_markdown(rows, ready))
-    end
-
-    def sweep_annotation_level(row)
-      if row.verdict == :not_ready ||
-          (row.errors + row.dep_errors).positive?
-        "error"
-      elsif row.warnings.positive?
-        "warning"
-      end
-    end
-
-    def sweep_summary_markdown(rows, ready)
-      lines = [
-        "## audition bundle sweep", "",
-        "| gem | version | verdict | errors | dep errors " \
-        "| warnings | fixable |",
-        "| --- | --- | --- | --- | --- | --- | --- |"
-      ]
-      rows.each do |r|
-        lines << "| #{r.name} | #{r.version} | " \
-          "#{VERDICT_CELLS.fetch(r.verdict)} | #{r.errors} | " \
-          "#{r.dep_errors} | #{r.warnings} | #{r.fixable} |"
-      end
-      lines << ""
-      lines << "#{ready} of #{rows.size} gems ractor-ready"
-      lines.join("\n")
-    end
-
-    def emit_sweep_json(rows)
-      @stdout.puts(JSON.pretty_generate(
-        "audition" => VERSION,
-        "ruby" => RUBY_VERSION,
-        "bundle" => rows.map do |r|
-          {
-            "gem" => r.name,
-            "version" => r.version,
-            "verdict" => r.verdict&.to_s,
-            "errors" => r.errors,
-            "dependency_errors" => r.dep_errors,
-            "warnings" => r.warnings,
-            "infos" => r.infos,
-            "fixable" => r.fixable,
-            "status" => r.status
-          }
-        end
-      ))
-    end
-
     def print_capabilities(options)
       result = prober(options).probe(mode: :capabilities)
       caps = result.raw["capabilities"]
       unless caps
-        @stderr.puts(
-          "audition: capabilities probe failed: #{result.raw}"
-        )
+        complain("capabilities probe failed: #{result.raw}",
+          options)
         return 2
       end
 
+      s = style(options)
       rows = caps.map do |probe, info|
         {
           "works in Ractor" => probe,
-          "ok" => info["ok"] ? "yes" : "no",
-          "raises" => info["error"] || "-"
+          "ok" => s.glyph(info["ok"] ? :pass : :error),
+          "raises" => info["error"]
         }
       end
-      @stdout.puts("ruby #{RUBY_VERSION} at #{RbConfig.ruby}")
       @stdout.puts(
-        TableTennis.new(rows, **table_opts(options)).to_s
+        "#{s.glyph(:section)} #{s.bold("ruby #{RUBY_VERSION}")} " \
+        "#{s.dim("at #{RbConfig.ruby}")}"
       )
+      @stdout.puts(TableTennis.new(rows,
+        title: "Audition capabilities", **table_opts(options)).to_s)
       0
     end
   end

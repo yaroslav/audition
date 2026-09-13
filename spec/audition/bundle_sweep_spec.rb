@@ -46,6 +46,25 @@ RSpec.describe Audition::BundleSweep do
     end
   end
 
+  it "narrates one named unit per gem" do
+    Dir.mktmpdir do |dir|
+      lock = write_lockfile(dir, ["no-such-gem-xyz (1.0.0)"])
+      io = StringIO.new
+      progress = Audition::Progress.new(
+        renderer: Audition::Progress::Log.new(io,
+          style: Audition::Report::Style.new(color: false,
+            hyperlinks: false))
+      )
+
+      described_class.new(lockfile: lock, static_only: true)
+        .rows(progress: progress)
+
+      expect(io.string)
+        .to include("Audition: sweep no-such-gem-xyz (1/1)")
+      expect(io.string).to match(/sweep: 1 gems in/)
+    end
+  end
+
   it "audits the installed spec of the locked version" do
     Dir.mktmpdir do |dir|
       lock = write_lockfile(dir, ["mygem (1.2.3)"])
