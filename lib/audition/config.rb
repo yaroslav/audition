@@ -10,6 +10,8 @@ module Audition
   #   exclude:
   #     - legacy/**
   #     - db/schema.rb
+  #   test_dirs:
+  #     - qa
   #   checks:
   #     disable:
   #       - at-exit
@@ -20,7 +22,7 @@ module Audition
 
     EMPTY = Ractor.make_shareable(
       {fail_on: nil, timeout: nil, exclude: [],
-       disabled_checks: []}
+       disabled_checks: [], test_dirs: nil}
     )
 
     FAIL_ON_LEVELS = %w[error warning info never].freeze
@@ -42,7 +44,8 @@ module Audition
         timeout: data["timeout"],
         exclude: Array(data["exclude"]).map(&:to_s),
         disabled_checks:
-          Array(data.dig("checks", "disable")).map(&:to_s)
+          Array(data.dig("checks", "disable")).map(&:to_s),
+        test_dirs: data["test_dirs"]&.map(&:to_s)
       )
     rescue Psych::Exception => e
       raise Error, "#{path}: #{e.message}"
@@ -54,6 +57,7 @@ module Audition
           "#{path}: expected a YAML mapping, got #{data.class}"
       end
 
+      validate_test_dirs!(path, data["test_dirs"])
       fail_on = data["fail_on"]
       return if fail_on.nil? ||
         FAIL_ON_LEVELS.include?(fail_on.to_s)
@@ -62,13 +66,35 @@ module Audition
         "#{path}: fail_on must be one of error, warning, " \
         "info, or never (got #{fail_on.inspect})"
     end
-    private_class_method :validate!
 
-    def initialize(fail_on:, timeout:, exclude:, disabled_checks:)
+    # Each name is matched against one path segment, so a nested
+    # path would silently match nothing.
+    def self.validate_test_dirs!(path, dirs)
+      return if dirs.nil? || (dirs.is_a?(Array) &&
+        dirs.none? { |dir| dir.to_s.include?("/") })
+
+      raise Error,
+        "#{path}: test_dirs must be a list of directory names " \
+        "without slashes (got #{dirs.inspect})"
+    end
+    private_class_method :validate!, :validate_test_dirs!
+
+    def initialize(fail_on:, timeout:, exclude:, disabled_checks:,
+      test_dirs: nil)
       @fail_on = fail_on
       @timeout = timeout
       @exclude = exclude
       @disabled_checks = disabled_checks
+      @test_dirs = test_dirs
+    end
+
+    # Directories whose findings are tagged as test code rather
+    # than code a production boot loads. An explicit empty list
+    # leaves only the `_test.rb`/`_spec.rb` suffixes.
+    #
+    # @return [Array<String>] Target::TEST_DIRS unless configured
+    def test_dirs
+      @test_dirs || Target::TEST_DIRS
     end
 
     # Globs follow .gitignore-style expectations: `*` stays within
