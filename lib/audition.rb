@@ -1,12 +1,14 @@
 # frozen_string_literal: true
 
 require_relative "audition/version"
+require_relative "audition/progress"
 require_relative "audition/finding"
 require_relative "audition/target"
 require_relative "audition/static/source_file"
 require_relative "audition/static/literal_classifier"
 require_relative "audition/static/checks"
 require_relative "audition/static/graph_audit"
+require_relative "audition/static/gem_calls"
 require_relative "audition/static/native_extensions"
 require_relative "audition/static/analyzer"
 require_relative "audition/dynamic/prober"
