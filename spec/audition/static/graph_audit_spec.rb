@@ -375,6 +375,104 @@ RSpec.describe Audition::Static::GraphAudit do
 
       expect(findings).to be_empty
     end
+
+    it "reads an extend resolved through const_get" do
+      findings = findings_for(
+        "a.rb" => <<~RUBY,
+          module Scoped
+            def scope(name) = (@scope = name)
+          end
+        RUBY
+        "b.rb" => <<~RUBY
+          class Vault
+            extend const_get(:Scoped)
+          end
+        RUBY
+      )
+
+      expect(findings.map(&:message)).to contain_exactly(
+        a_string_including("@scope on Scoped")
+      )
+    end
+
+    it "counts a module prepended to a singleton class" do
+      findings = findings_for(
+        "a.rb" => <<~RUBY,
+          module Scoped
+            def scope(name) = (@scope = name)
+          end
+        RUBY
+        "b.rb" => <<~RUBY
+          class Vault
+            singleton_class.prepend Scoped
+          end
+        RUBY
+      )
+
+      expect(findings.map(&:message)).to contain_exactly(
+        a_string_including("@scope on Scoped")
+      )
+    end
+  end
+
+  # The mixin that puts these on the class lives in the library
+  # defining the concern, never in the target.
+  describe "concern class methods" do
+    it "flags an ivar in a companion module no source extends" do
+      findings = findings_for(
+        "a.rb" => <<~RUBY
+          module Cache
+            module ClassMethods
+              def warm?
+                return @warm if defined?(@warm)
+                @warm = true
+              end
+            end
+          end
+        RUBY
+      )
+
+      expect(findings.size).to eq(1)
+      expect(findings.first).to have_attributes(
+        path: "a.rb", line: 5, severity: :error
+      )
+      expect(findings.first.message).to include(
+        "@warm on Cache::ClassMethods"
+      )
+    end
+
+    it "flags an ivar written in a class-methods block" do
+      findings = findings_for(
+        "a.rb" => <<~RUBY
+          module Cache
+            class_methods do
+              def warm?
+                return @warm if defined?(@warm)
+                @warm = true
+              end
+            end
+          end
+        RUBY
+      )
+
+      expect(findings.map(&:message)).to contain_exactly(
+        a_string_including("@warm on Cache::ClassMethods")
+      )
+    end
+
+    it "leaves the instance side of a concern alone" do
+      findings = findings_for(
+        "a.rb" => <<~RUBY
+          module Cache
+            def warm!
+              @warm = true
+            end
+          end
+        RUBY
+      )
+
+      expect(findings).to be_empty
+    end
   end
 
   describe "dynamic instance variable writes" do

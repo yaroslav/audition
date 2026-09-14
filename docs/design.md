@@ -114,7 +114,8 @@ holding a hash of unfrozen arrays, and a shallow-frozen singleton.
   `:opaque_call`, `:shallow_opaque`...); the shared vocabulary under the constant
   checks.
 - `Audition::Static::GraphAudit`; the rubydex-graph pass: `class-variables`,
-  `class-level-state` (including singleton attributes and writes through them),
+  `class-level-state` (including singleton attributes, writes through them, and
+  the companion module a concern puts on the class),
   `derived-constants` (a flagged value followed into the constants that capture it),
   and `static-scan` (the graph's own unresolved expressions, where the shape could
   hide what the other walks look for).

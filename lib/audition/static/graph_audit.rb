@@ -422,11 +422,21 @@ module Audition
       def record_mixin(found, node, owner)
         return unless owner && node.receiver.nil? &&
           MIXINS.include?(node.name.to_s)
+        return if resolved_mixin?(node)
 
         location = node.location
         (location.start_line..location.end_line).each do |line|
           found[line] ||= [node.name.to_s, owner]
         end
+      end
+
+      # The graph gave up on the line, but if every argument
+      # names a constant the walks read it anyway, and saying
+      # otherwise would contradict the finding they emit.
+      def resolved_mixin?(node)
+        arguments = Array(node.arguments&.arguments)
+        arguments.any? &&
+          arguments.all? { |arg| constant_slice(arg) }
       end
 
       def constant_assigned_at(root, line)
@@ -1052,17 +1062,34 @@ module Audition
         end
       end
 
+      # The name a concern gives the module it puts on the class.
+      # Nothing in the concern's own source extends it: the mixin
+      # that does lives in whatever library defines the pattern,
+      # so within the target the name is the only evidence.
+      CLASS_METHODS = "ClassMethods"
+
+      # The same methods declared as a block, with no module in
+      # the source to hang the name on: the concern synthesizes
+      # one under the conventional name at load time.
+      CLASS_METHODS_BLOCK = :class_methods
+
+      # Mixing into a singleton class lands a module's instance
+      # methods on the class, the way extend does.
+      SINGLETON_MIXINS = Ractor.make_shareable(
+        Set.new(%i[prepend include])
+      )
+
       # A module reached through its last name segment: the
       # extend site and the definition rarely spell the path
       # the same way.
       def extended_names
-        names = Set.new
+        names = Set.new([CLASS_METHODS])
         source_roots.each_value { |root| collect_extends(root, names) }
         names
       end
 
       def collect_extends(node, names)
-        if node.is_a?(Prism::CallNode) && node.name == :extend
+        if node.is_a?(Prism::CallNode) && extend_call?(node)
           Array(node.arguments&.arguments).each do |arg|
             name = constant_slice(arg)
             names << name.split("::").last if name
@@ -1071,10 +1098,37 @@ module Audition
         node.compact_child_nodes.each { |c| collect_extends(c, names) }
       end
 
+      def extend_call?(node)
+        return true if node.name == :extend
+        return false unless SINGLETON_MIXINS.include?(node.name)
+
+        node.receiver.is_a?(Prism::CallNode) &&
+          node.receiver.name == :singleton_class
+      end
+
       def constant_slice(node)
         case node
         when Prism::ConstantReadNode, Prism::ConstantPathNode
           node.slice.delete_prefix("::")
+        when Prism::CallNode
+          const_get_slice(node)
+        end
+      end
+
+      # A constant fetched through `const_get` names it as
+      # plainly as the constant does, and a concern resolving
+      # its own companion module writes the extend that way.
+      # Only on self: an explicit receiver picks the scope at
+      # runtime, which is the blind spot the scan reports.
+      def const_get_slice(node)
+        return unless node.name == :const_get
+        return unless node.receiver.nil? ||
+          node.receiver.is_a?(Prism::SelfNode)
+
+        argument = Array(node.arguments&.arguments).first
+        case argument
+        when Prism::SymbolNode, Prism::StringNode
+          argument.unescaped
         end
       end
 
@@ -1091,6 +1145,10 @@ module Audition
         when Prism::ClassNode
           nesting += [node.constant_path.slice]
           owner = nil
+        when Prism::CallNode
+          if node.block && node.name == CLASS_METHODS_BLOCK
+            owner = (nesting + [CLASS_METHODS]).join("::")
+          end
         when Prism::DefNode
           return if node.receiver
         else

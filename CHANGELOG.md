@@ -82,6 +82,19 @@
   provably a class. Computed names, unprovable receivers,
   `instance_variable_get`, `instance_variable_defined?` and
   `instance_variables` stay quiet.
+- Class-level state no longer waits to be shown the `extend`. A
+  concern puts its companion module on the class from inside
+  whatever library defines the pattern, so nothing in the target
+  ever spells `extend ClassMethods`, and a nested `ClassMethods`
+  module or a `class_methods do` block went unread. Both are now
+  walked as class-level scope. Which trees reported them used to
+  turn on an unrelated file—one literal `extend ClassMethods`
+  anywhere in a scan seeded the name for all of it—so the same
+  shape was an error in one library and silent in its neighbour.
+  `extend const_get(:Name)` on self and a module mixed into a
+  `singleton_class` now count as extend sites, and a mixin
+  argument that resolves this way stops being reported as one
+  the graph could not read.
 - New check `dependency-class-state`: a dependency holding its
   configuration in a class-level ivar has no source in the
   tree, so the call site is flagged; the target's own type
