@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.4.0] - Unreleased
+## [0.4.0] - 2026-09-15
 
 - Progress narration on stderr, stdout left pipeable:
   `◆ Audition checking 50/919 5% (0.2s, on 8 ractors)`,
