@@ -28,7 +28,7 @@ Gem::Specification.new do |spec|
 
   spec.add_dependency "pastel", ">= 0.8"
   spec.add_dependency "prism", ">= 1.0"
-  spec.add_dependency "rubydex", ">= 0.2"
+  spec.add_dependency "rubydex", ">= 0.4"
   spec.add_dependency "table_tennis", ">= 1.0"
   spec.add_dependency "tty-link", ">= 0.2"
 end
