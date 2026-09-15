@@ -154,6 +154,9 @@
   `File.expand_path`, `join`, `dirname`, `basename`,
   `absolute_path` and `realpath` return fresh Strings—mutable
   bare, shareable frozen.
+- Requires rubydex 0.4. The static scan reads rule objects and
+  the `Rubydex::Rules` table, neither of which 0.3 ships; the
+  dependency floor moves from 0.2 to 0.4 to say so.
 
 ## [0.3.0] - 2026-09-05
 
