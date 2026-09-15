@@ -160,7 +160,10 @@ RSpec.describe "unsafe rewriters" do
       expect(content.lines.first)
         .to eq("# frozen_string_literal: true\n")
       expect(content).to include(%(NAME = "audition"\n))
-      expect(all_findings(path)).to be_empty
+      # The opaque DYNAMIC warning stays; only the string is fixed.
+      remaining = all_findings(path)
+      expect(remaining.map(&:severity)).to eq([:warning])
+      expect(remaining.first.message).to include("DYNAMIC")
     end
   end
 

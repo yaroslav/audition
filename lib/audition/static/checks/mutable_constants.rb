@@ -103,6 +103,44 @@ module Audition
                "or drop the default proc and fetch with a " \
                "literal default: hash.fetch(key, [])."
 
+        explain :unshareable_instance,
+          severity: :warning,
+          message: "constant %{name} holds an unfrozen %{klass} " \
+                   "instance",
+          why: "A fresh instance is unfrozen, so non-main " \
+               "Ractors raise Ractor::IsolationError reading " \
+               "it. A warning, not an error: .new can be " \
+               "overridden to return a shareable value.",
+          fix: "Freeze it when deeply immutable, wrap in " \
+               "Ractor.make_shareable, or keep a per-Ractor " \
+               "copy via Ractor.store_if_absent."
+
+        explain :shallow_opaque,
+          severity: :warning,
+          message: "constant %{name} is frozen at the top level " \
+                   "only; what it holds is unproven",
+          why: "Freezing is shallow: elements and instance " \
+               "variables stay as their calls returned them, and " \
+               "unless those are deeply frozen a non-main Ractor " \
+               "reading the constant raises " \
+               "Ractor::IsolationError. The dynamic probe settles " \
+               "it when the target boots.",
+          fix: "Build the value with Ractor.make_shareable for a " \
+               "deep freeze, or silence a known-shareable value " \
+               "with a disable comment."
+
+        explain :opaque_constant,
+          severity: :warning,
+          message: "constant %{name} holds the result of " \
+                   "%{method}; shareability unproven",
+          why: "Unless the call returns a deeply frozen value, " \
+               "non-main Ractors raise Ractor::IsolationError " \
+               "reading the constant. The dynamic probe settles " \
+               "it when the target boots.",
+          fix: "Freeze the result at definition time, or " \
+               "silence a known-shareable value with a disable " \
+               "comment."
+
         explain :constant_mutation,
           severity: :warning,
           message: "in-place %{method} on constant %{name}",
@@ -152,6 +190,10 @@ module Audition
           # finding stays, the autofix goes.
           fix_ok = !mutated?(name) && !customized?(name)
           kind = classifier.classify(value)
+          # A Sorbet cast returns its argument and a begin
+          # block its last statement: fixes, type names and
+          # depth checks target the value inside.
+          value = classifier.unwrap(value)
           # Build-then-freeze: a bare `NAME.freeze` later in the
           # same body makes the literal as good as frozen, so
           # only provably mutable elements remain to report.
@@ -195,6 +237,20 @@ module Audition
               autofix: wrappable ? wrap_make_shareable(value) : nil)
           when :default_proc
             flag(node, :hash_default_proc, name: name)
+          when :shallow_opaque
+            flag(node, :shallow_opaque, name: name)
+          # Build-then-freeze leaves depth unknown: stay silent.
+          when :instance_new
+            unless frozen_later?(name)
+              flag(node, :unshareable_instance, name: name,
+                klass:
+                  classifier.const_name(value.receiver) || "new")
+            end
+          when :opaque_call
+            unless frozen_later?(name)
+              flag(node, :opaque_constant, name: name,
+                method: opaque_display(value))
+            end
           end
         end
 
@@ -311,6 +367,21 @@ module Audition
 
           owner = classifier.const_name(call.receiver)
           owner ? "#{owner}.#{call.name}" : "String##{call.name}"
+        end
+
+        # The receiver is arbitrary, often a chain, so the
+        # fallback names only the method.
+        def opaque_display(call)
+          owner = classifier.const_name(call.receiver)
+          method =
+            if owner
+              "#{owner}.#{call.name}"
+            elsif call.receiver
+              ".#{call.name}"
+            else
+              call.name.to_s
+            end
+          "a #{method} call"
         end
 
         # `.freeze` binds tighter than an operator: `"a" + "b".freeze`

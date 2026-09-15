@@ -1,18 +1,21 @@
 # frozen_string_literal: true
 
 require_relative "checks/base"
+require_relative "checks/dependency_class_state"
 require_relative "checks/global_variables"
 require_relative "checks/mutable_constants"
 require_relative "checks/ractor_isolation"
 require_relative "checks/runtime_require"
 require_relative "checks/unsafe_calls"
+require_relative "checks/unshareable_reads"
 
 module Audition
   module Static
     module Checks
       BUILT_IN = [
-        GlobalVariables, MutableConstants, RactorIsolation,
-        RuntimeRequire, UnsafeCalls
+        DependencyClassState, GlobalVariables, MutableConstants,
+        RactorIsolation, RuntimeRequire, UnsafeCalls,
+        UnshareableReads
       ].freeze
 
       # Expression-level checks, run per file. Class variables and

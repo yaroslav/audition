@@ -2,7 +2,7 @@
 
 Point it at a Ruby script, a gem, a Rack app, or a Rails root and it
 tells you whether that code can run inside Ractors, why it cannot,
-and how to fix it. Unlike a linter, audition does not stop at
+and how to fix it. Unlike a linter, Audition does not stop at
 pattern-matching your source: whole-program analysis is powered by
 [rubydex](https://github.com/Shopify/rubydex), Shopify's Ruby
 indexer, and the target is also loaded in a sandboxed subprocess
@@ -47,7 +47,7 @@ core itself is being ractorized; see the
   state, so `globalid` is not blamed for ActiveSupport's state.
 - **Dogfooding.** The scanner for Ractor compatibility is built
   using Ractors: static analysis fans out across CPU cores on
-  Ractor workers, and audition passes its own audit. It runs on
+  Ractor workers, and Audition passes its own audit. It runs on
   itself on every commit (a lefthook pre-commit over the staged
   files) and on every push (a full self-audit in CI).
 - **Trained on Rails core.** Several checks and fix suggestions
@@ -58,26 +58,24 @@ core itself is being ractorized; see the
   findings are documented in
   [docs/rails_core_best_practices.md](docs/rails_core_best_practices.md).
 - **Terminal-native output.** Colors, glyphs, and OSC 8 hyperlinks;
-  `path:line` is clickable in supporting terminals. JSON output for
-  CI.
+  `path:line` is clickable in supporting terminals. Long scans
+  narrate their phases on stderr. JSON output for CI.
 
 ```console
 $ audition worker.rb
-* audition 0.1.0 ruby 4.0.6 · script at .
+* Audition 0.3.0 ruby 4.0.6 · script at .
 
   worker.rb
-    x raises inside a Ractor: Ractor::IsolationError: can not
-      access global variable $jobs from non-main Ractor
-      why: The script ran fine on the main Ractor but failed under
-      Ractor.new; the static findings usually pinpoint the line.
-    x worker.rb:1  write to global variable $jobs
-      why: Non-main Ractors cannot access global variables; this
-      raises Ractor::IsolationError the moment the line executes
-      in a Ractor (verified on Ruby 4.0).
-      fix: Pass the value into the Ractor explicitly
-      (Ractor.new(value) { |v| ... }) or over a Ractor::Port; for
-      per-Ractor state use Ractor.current[:key].
-    x worker.rb:4  read of global variable $jobs
+    x worker.rb:1  write to global variable $jobs global-variables
+      why: Non-main Ractors cannot access global variables; this raises
+      Ractor::IsolationError the moment the line executes in a Ractor
+      (verified on Ruby 4.0).
+      fix: Pass the value into the Ractor explicitly (Ractor.new(value) {
+      |v| ... }) or over a Ractor::Port; for per-Ractor state use
+      Ractor.current[:key]; do one-time process setup on the main Ractor
+      before spawning.
+    x worker.rb:1  raises inside a Ractor: Ractor::IsolationError ...
+    x worker.rb:4  read of global variable $jobs global-variables
       ...
 
   dynamic probes
@@ -93,16 +91,29 @@ And the whole-bundle view:
 
 ```console
 $ audition Gemfile.lock --static-only
-╭───────────────┬─────────┬───────────┬────────┬──────────┬─────────╮
-│ gem           │ version │ verdict   │ errors │ warnings │ fixable │
-├───────────────┼─────────┼───────────┼────────┼──────────┼─────────┤
-│ activesupport │ 8.1.0   │ not ready │    157 │       97 │      77 │
-│ i18n          │ 1.14.7  │ not ready │     48 │       40 │      45 │
-│ mail          │ 2.9.1   │ not ready │     27 │        4 │      13 │
-│ rack          │ 3.2.6   │ not ready │     23 │       45 │      60 │
-│ ...           │         │           │        │          │         │
-╰───────────────┴─────────┴───────────┴────────┴──────────┴─────────╯
-0 of 11 gems ractor-ready
+╭───────────────────────────────────────────────────────────────────────────────────────╮
+│                                 Audition bundle sweep                                 │
+├──────────┬──────────┬─────────────┬────────┬────────────┬──────────┬─────────┬────────┤
+│ gem      │ version  │ verdict     │ errors │ dep errors │ warnings │ fixable │ status │
+├──────────┼──────────┼─────────────┼────────┼────────────┼──────────┼─────────┼────────┤
+│ rubocop  │ 1.88.2   │ x not ready │    194 │ -          │      203 │      28 │ ok     │
+│ parser   │ 3.3.12.0 │ x not ready │    154 │ -          │       26 │      26 │ ok     │
+│ rack     │ 3.2.7    │ x not ready │     31 │ -          │       61 │      13 │ ok     │
+│ rake     │ 13.4.2   │ x not ready │     30 │ -          │       24 │       5 │ ok     │
+│ prism    │ 1.9.0    │ x not ready │     16 │ -          │       88 │      15 │ ok     │
+│ json     │ 2.21.2   │ x not ready │      7 │ -          │        5 │       - │ ok     │
+│ pastel   │ 0.8.0    │ x not ready │      2 │ -          │        1 │       - │ ok     │
+│ tty-link │ 0.2.0    │ x not ready │      1 │ -          │        1 │       - │ ok     │
+╰──────────┴──────────┴─────────────┴────────┴────────────┴──────────┴─────────┴────────╯
+
+x 0 of 8 gems ractor-ready · 8 not ready
+```
+
+Verdicts are colored by severity, clean counts are left blank, and
+the sweep names each gem as it finishes:
+
+```console
+◆ Audition sweep rubocop 8/8 (100%) 5.8s
 ```
 
 **Requires Ruby 4.0 or newer**, strictly: the tool targets the modern
@@ -172,6 +183,20 @@ Useful flags:
 | `--capabilities` | table of what this Ruby allows in Ractors |
 | `--timeout 60` | dynamic probe budget in seconds |
 | `--plain` | no colors or hyperlinks (also via NO_COLOR, pipes) |
+| `--progress` / `--no-progress` | force / suppress the stderr narration |
+| `-j 4` / `--workers 4` | scan Ractors (default: cores, capped by `RUBY_MAX_CPU`) |
+
+Long runs narrate themselves on stderr, so stdout stays pipeable:
+a rewriting status line on a terminal, one line per phase off it.
+
+```
+◆ Audition checking 50/919 5% (0.2s, on 8 ractors)
+```
+
+A phase running in Ractors says how many. The narration turns on
+by itself for a large tree or a bundle sweep and stays off for
+`--format json` and `--format github`; the flags force either
+way.
 
 Exit codes: `0` clean, `1` findings at or above the `--fail-on`
 threshold (or a failed dynamic probe), `2` usage error.
@@ -210,10 +235,19 @@ timeout: 60
 exclude:
   - legacy/**
   - db/schema.rb
+test_dirs:
+  - qa
 checks:
   disable:
     - at-exit
 ```
+
+`test_dirs` names the directories that hold tests rather than
+code a production boot loads; findings in them are tagged
+`test` and rated as test code. It defaults to `test`, `spec`,
+`features`, and replaces that list rather than adding to it—the
+`_test.rb` and `_spec.rb` suffixes always count, whatever it
+says.
 
 ## CI and git hooks
 
@@ -260,7 +294,7 @@ With [pre-commit](https://pre-commit.com):
 - repo: local
   hooks:
     - id: audition
-      name: audition
+      name: Audition
       language: system
       entry: audition --static-only --plain
       types: [ruby]
@@ -292,7 +326,7 @@ Static, with file:line precision:
   `@cache ||= {}` and `return @x if defined?(@x)` memoizations.
 - **Constants that are not deeply shareable**: bare mutable
   literals, interpolated strings, the subtle shallow freeze
-  (`[[1], [2]].freeze` still raises; audition explains why), and
+  (`[[1], [2]].freeze` still raises; Audition explains why), and
   call results the magic comment never covers (`X.tr(":", "")`,
   `Regexp.new`, `Regexp.union`, `format`), the shapes Rails fixed
   last in its own ractorization. Honors `# frozen_string_literal:`
@@ -317,11 +351,21 @@ Static, with file:line precision:
   scan of every compiled `.bundle`/`.so` for the
   `rb_ext_ractor_safe` import, which also covers precompiled
   platform gems that ship no sources; an unbuilt checkout is
-  scanned at the source level (`ext/**`, C, Rust, or Zig) instead.
+  scanned at the source level instead (C, Rust, or Zig sources
+  beside their `extconf.rb`, `Cargo.toml` or `build.zig`).
   A silent extension raises `Ractor::UnsafeError` on every call
   from a non-main Ractor, so it rates a warning; a declared one
   gets an info note, because the declaration is the maintainer's
   assertion, not a proof.
+- **The static pass's own blind spots**: where rubydex reports an
+  expression it could not resolve and the shape could hide what
+  the checks above look for, the hole is reported rather than
+  read as a clean line — a singleton opened on a runtime receiver
+  that writes class-level state, a superclass or `include`
+  argument computed at runtime, a constant assigned through an
+  unresolved path. A clean report for such a class covers only
+  what the class itself declares; the dynamic probe reaches the
+  rest.
 
 Dynamic, on the live object graph:
 
@@ -346,7 +390,7 @@ Dynamic, on the live object graph:
 ## Agent skill
 
 This repository ships a `ractor-readiness` skill that teaches
-coding agents (Claude Code and friends) the full audition
+coding agents (Claude Code and friends) the full Audition
 workflow: audit, fix tiers, suite-parity verification, and
 incremental adoption. It lives in
 [skills/ractor-readiness/SKILL.md](skills/ractor-readiness/SKILL.md).
@@ -402,7 +446,7 @@ bundle exec exe/audition --capabilities
 ```
 
 Static scanning is Ractor-parallel on large targets (one worker
-per core, minus one for the main Ractor); audition's own `lib/`
+per core, minus one for the main Ractor); Audition's own `lib/`
 passes `audition lib` clean.
 
 The design notes in `docs/design.md` include the empirically
@@ -413,7 +457,7 @@ calibrated against.
 
 The whole-program checks stand on
 [rubydex](https://github.com/Shopify/rubydex), Shopify's
-high-performance static analysis suite for Ruby: audition feeds
+high-performance static analysis suite for Ruby: Audition feeds
 every file into its graph and reads state ownership back out.
 Thanks to its authors, in particular the top five contributors:
 [Alexandre Terrasa](https://github.com/Morriar),

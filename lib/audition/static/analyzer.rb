@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "etc"
+require_relative "work_split"
 
 module Audition
   module Static
@@ -27,6 +27,10 @@ module Audition
 
       PARALLEL_THRESHOLD = 16
 
+      # Workers report in batches: a port message per file would
+      # cost more than the redraw it feeds.
+      TICK_STRIDE = 25
+
       # Scans files across Ractors when there are enough of them to
       # be worth the spawn cost. Checks are plain shareable classes
       # with deeply frozen catalogs, findings copy back through
@@ -34,47 +38,112 @@ module Audition
       # serial path.
       #
       # @param paths [Array<String>] files to analyze
-      # @param workers [Integer] Ractor count (defaults to
-      #   processor count minus one)
+      # @param workers [Integer, nil] Ractor count (defaults to
+      #   {#default_workers})
       # @param threshold [Integer] minimum file count before
       #   Ractors are used at all
+      # @param progress [Progress] ticked per file
       # @return [Array<Finding>]
-      def analyze_paths(paths, workers: default_workers,
-        threshold: PARALLEL_THRESHOLD)
+      def analyze_paths(paths, workers: nil,
+        threshold: PARALLEL_THRESHOLD, progress: Progress::SILENT)
+        workers ||= default_workers
         if paths.size < threshold || workers <= 1
-          return paths.flat_map { |path| analyze_path(path) }
+          return serial_analyze(paths, progress)
         end
 
-        parallel_analyze(paths, workers)
+        parallel_analyze(paths, workers, progress)
       rescue Ractor::Error => e
         # The silent fallback would otherwise mask a check that is
         # itself Ractor-hostile; surface it under -w.
         if $VERBOSE
-          warn "audition: parallel scan fell back to serial: " \
+          warn "Audition: parallel scan fell back to serial: " \
                "#{e.class}: #{e.message}"
         end
-        paths.flat_map { |path| analyze_path(path) }
+        progress.ractors = nil
+        serial_analyze(paths, progress)
       end
 
       private
 
-      def parallel_analyze(paths, workers)
+      def serial_analyze(paths, progress)
+        paths.flat_map do |path|
+          findings = analyze_path(path)
+          progress.tick
+          findings
+        end
+      end
+
+      # A port carries counts out of the workers while they run:
+      # the alternative is a status line frozen for the whole
+      # parallel phase, which is most of a large scan.
+      def parallel_analyze(paths, workers, progress)
         experimental = Warning[:experimental]
         Warning[:experimental] = false
-        slice = (paths.size / workers.to_f).ceil
         checks = @checks
-        paths.each_slice(slice).map do |chunk|
-          Ractor.new(chunk, checks) do |files, active_checks|
-            analyzer = Analyzer.new(checks: active_checks)
-            files.flat_map { |file| analyzer.analyze_path(file) }
+        port = progress.enabled? ? Ractor::Port.new : nil
+        chunks = balanced_chunks(paths, workers)
+        progress.ractors = chunks.size
+        ractors = chunks.map do |chunk|
+          # The sentinel goes out through `ensure` so a worker that
+          # raises still releases the drain loop; the exception
+          # itself still surfaces from `Ractor#value`.
+          Ractor.new(chunk, checks, port) do |files, active, tap|
+            analyzer = Analyzer.new(checks: active)
+            pending = 0
+            begin
+              files.flat_map do |file|
+                findings = analyzer.analyze_path(file)
+                pending += 1
+                if tap && pending >= TICK_STRIDE
+                  tap.send(pending)
+                  pending = 0
+                end
+                findings
+              end
+            ensure
+              tap&.send(pending)
+              tap&.send(:done)
+            end
           end
-        end.flat_map(&:value)
+        end
+        drain(port, ractors.size, progress) if port
+        ractors.flat_map(&:value)
       ensure
         Warning[:experimental] = experimental
       end
 
+      def drain(port, workers, progress)
+        done = 0
+        while done < workers
+          message = port.receive
+          if message == :done
+            done += 1
+          else
+            progress.tick(message)
+          end
+        end
+      rescue
+        # Narration is cosmetic; a closed port ends it quietly and
+        # `Ractor#value` still reports what went wrong.
+        nil
+      end
+
       def default_workers
-        [Etc.nprocessors - 1, 1].max
+        WorkSplit.workers
+      end
+
+      # Byte size stands in for parse cost, and the stat it costs
+      # is nothing beside the parse it schedules.
+      def balanced_chunks(paths, workers)
+        WorkSplit.chunks(
+          paths.map { |path| [path, file_size(path)] }, workers
+        )
+      end
+
+      def file_size(path)
+        File.size(path)
+      rescue SystemCallError
+        0
       end
 
       def analyze_file(file)

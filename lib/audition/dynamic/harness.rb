@@ -15,7 +15,11 @@ require "json"
 require "rbconfig"
 
 module AuditionHarness
-  MAX_CONSTS = 5000
+  # High enough for the largest targets: the sweep is the backstop
+  # for everything static analysis cannot prove, so it must reach
+  # every constant the boot defined. A hit is reported as
+  # truncated, never silent.
+  MAX_CONSTS = 200_000
 
   # Directories under the target root that are not the target's
   # own surface. Bundler's deployment mode (and bundler-cache in
@@ -82,7 +86,18 @@ module AuditionHarness
   def describe_error(error)
     root = unwrap(error)
     {"class" => scrub(root.class.name.to_s),
-     "message" => scrub(root.message.to_s)[0, 500]}
+     "message" => scrub(root.message.to_s)[0, 500],
+     "backtrace" => backtrace_for(root)}
+  end
+
+  # Enough frames to reach the target's code under framework
+  # wrappers; frames carry paths, which can carry arbitrary bytes.
+  def backtrace_for(error)
+    Array(error.backtrace).first(30).map do |frame|
+      scrub(frame.to_s)[0, 300]
+    end
+  rescue Exception
+    []
   end
 
   def scrub(text)
@@ -137,10 +152,15 @@ module AuditionHarness
     Array(payload["load_paths"]).each do |lp|
       $LOAD_PATH.unshift(lp) # audition:disable global-variables
     end
+    baseline = module_state_snapshot
     before = Object.constants
     features = $LOADED_FEATURES.dup # audition:disable global-variables
-    require_target(payload.fetch("feature"), payload["root"])
-    scan(Object.constants - before, root: payload["root"]).merge(
+    require_target(payload.fetch("feature"),
+      Array(payload["load_paths"]))
+    merge_reopened(
+      scan(Object.constants - before, root: payload["root"],
+        limit: payload["max_constants"]), baseline
+    ).merge(
       "native_extensions" => native_extensions(
         features, payload["root"], payload["known_compiled"]
       )
@@ -152,17 +172,17 @@ module AuditionHarness
   # rspec/mocks), and squashed names ship snake_case files
   # (activesupport provides active_support). The second has no
   # rule to invert, so when the target ships exactly one top-level
-  # file under lib/, that file is the entry, required by absolute
-  # path. An absolute require keeps the path as given, and scan
+  # file on its load paths, that file is the entry, required by
+  # absolute path. An absolute require keeps the path as given, and scan
   # compares constant origins against the realpathed root, so the
   # candidate is built from the realpath too (a symlinked tmpdir,
   # macOS /var, otherwise turns own findings into dependency ones).
   # The error reported is the last one seen: a candidate that loads
   # but fails inside says more than "cannot load such file".
-  def require_target(feature, root)
+  def require_target(feature, load_paths)
     require feature # audition:disable runtime-require
   rescue LoadError => error
-    entry_candidates(feature, root).each do |candidate|
+    entry_candidates(feature, load_paths).each do |candidate|
       return require candidate # audition:disable runtime-require
     rescue LoadError => e
       error = e
@@ -170,11 +190,13 @@ module AuditionHarness
     raise error
   end
 
-  def entry_candidates(feature, root)
+  def entry_candidates(feature, load_paths)
     candidates = []
     slashed = feature.tr("-", "/")
     candidates << slashed if slashed != feature
-    files = root ? Dir[File.join(realpath(root), "lib", "*.rb")] : []
+    files = load_paths.flat_map do |path|
+      Dir[File.join(realpath(path), "*.rb")]
+    end
     candidates << files.first.delete_suffix(".rb") if files.size == 1
     candidates
   end
@@ -184,23 +206,28 @@ module AuditionHarness
   # are inspected for class-level ivars and class variables, then
   # descended into. const_get can raise (autoload failures) and
   # anything can lie; every step is rescued and counted.
-  def scan(root_names, root: nil)
+  def scan(root_names, root: nil, limit: nil)
     # Loaded features are realpathed by require; the target root
     # must be too, or symlinked paths (macOS /var vs /private/var)
     # break the own-vs-dependency comparison.
     root = realpath(root)
+    limit = (limit || MAX_CONSTS).to_i
     unshareable = []
     class_state = []
     class_vars = []
     errors = 0
+    truncated = false
     seen = {}
     queue = root_names.map { |name| [Object, name.to_s] }
     visited = 0
 
     until queue.empty?
+      if visited >= limit
+        truncated = true
+        break
+      end
       owner, name = queue.shift
       visited += 1
-      break if visited > MAX_CONSTS
 
       begin
         value = owner.const_get(name, false)
@@ -223,8 +250,11 @@ module AuditionHarness
       else
         begin
           unless Ractor.shareable?(value)
+            blocker, blocker_depth = blocker_for(value)
             unshareable << origin.merge(
-              "const" => full, "class" => value.class.name
+              "const" => full, "class" => value.class.name,
+              "blocker" => blocker,
+              "blocker_nested" => blocker_depth.positive?
             )
           end
         rescue Exception
@@ -237,6 +267,8 @@ module AuditionHarness
      "class_state" => class_state,
      "class_variables" => class_vars,
      "scanned" => visited,
+     "truncated" => truncated,
+     "limit" => limit,
      "errors" => errors}
   end
 
@@ -340,6 +372,125 @@ module AuditionHarness
     false
   end
 
+  # Ivar/cvar state of every module defined before the boot. The
+  # new-constants sweep never revisits these, so state the boot
+  # plants on reopened core and stdlib classes is diffed against
+  # this snapshot instead. Autoload stubs are left untouched:
+  # forcing them here would load code behind the back of the
+  # before/after constant accounting.
+  def module_state_snapshot(limit = 50_000)
+    snap = {}
+    seen = {}
+    queue = Object.constants.map { |name| [Object, name.to_s] }
+    until queue.empty? || snap.size >= limit
+      owner, name = queue.shift
+      begin
+        next if owner.autoload?(name, false)
+
+        value = owner.const_get(name, false)
+      rescue Exception
+        next
+      end
+      next unless value.is_a?(Module)
+      next if seen[value.object_id]
+
+      seen[value.object_id] = true
+      begin
+        snap[value] = [value.instance_variables,
+          value.class_variables(false)]
+      rescue Exception
+        next
+      end
+      value.constants(false).each do |child|
+        queue << [value, child.to_s]
+      end
+    end
+    snap
+  end
+
+  # RubyGems, Bundler, and the VM mutate their own module state on
+  # every require; that is probe machinery, not the target's doing.
+  MACHINERY = /\A(?:Gem|Bundler|RubyVM)(?:::|\z)/
+
+  # State the boot added to pre-existing modules, reported through
+  # the same channels as freshly defined class state. No source
+  # location exists for a reopen, and unknown origins count as own.
+  def merge_reopened(result, snapshot)
+    origin = {"path" => nil, "line" => nil, "own" => true}
+    snapshot.each do |mod, (ivars, cvars)|
+      new_ivars = mod.instance_variables - ivars
+      new_cvars = mod.class_variables(false) - cvars
+      next if new_ivars.empty? && new_cvars.empty?
+
+      full = mod.name || mod.inspect
+      next if full.match?(MACHINERY)
+      if new_ivars.any?
+        unshareable = new_ivars.reject do |ivar|
+          safe_shareable?(mod.instance_variable_get(ivar))
+        end
+        result["class_state"] << origin.merge(
+          "const" => full,
+          "ivars" => new_ivars.map(&:to_s),
+          "unshareable" => unshareable.map(&:to_s)
+        )
+      end
+      if new_cvars.any?
+        result["class_variables"] << origin.merge(
+          "const" => full, "cvars" => new_cvars.map(&:to_s)
+        )
+      end
+    rescue Exception
+      next
+    end
+    result
+  end
+
+  # The innermost unshareable node of an unshareable value, with
+  # its depth: an unfrozen node with shareable contents just needs
+  # freezing, an inherently unshareable one needs replacing.
+  # Bounded, because shareability of each child is itself a
+  # recursive check.
+  def blocker_for(value, depth = 0)
+    return [describe_blocker(value), depth] if depth > 5
+
+    child = children_of(value).find { |c| !safe_shareable?(c) }
+    if child
+      blocker_for(child, depth + 1)
+    else
+      [describe_blocker(value), depth]
+    end
+  rescue Exception
+    [describe_blocker(value), depth]
+  end
+
+  def children_of(value)
+    children =
+      case value
+      when Hash then value.keys + value.values
+      when Array then value
+      when Struct, Data then value.deconstruct
+      else
+        value.instance_variables.map do |ivar|
+          value.instance_variable_get(ivar)
+        end
+      end
+    children.first(1000)
+  end
+
+  # "unfrozen X" only when freezing would actually flip the
+  # verdict; a Proc or IO stays unshareable frozen, and naming it
+  # unfrozen would send the reader to a fix that cannot work.
+  def describe_blocker(value)
+    return value.class.to_s if value.frozen?
+
+    frozen_helps = begin
+      Ractor.shareable?(value.dup.freeze)
+    rescue Exception
+      false
+    end
+    frozen_helps ? "unfrozen #{value.class}" : value.class.to_s
+  end
+
   # -- rack --------------------------------------------------------
 
   # App objects built in config.ru are almost never shareable (the
@@ -349,6 +500,8 @@ module AuditionHarness
   # and serve one request entirely inside a Ractor.
   def rack(payload)
     config_ru = payload.fetch("config_ru")
+    root = payload["root"] || File.dirname(config_ru)
+    bundler_setup
     begin
       require "rack" # audition:disable runtime-require
     rescue LoadError
@@ -356,6 +509,9 @@ module AuditionHarness
     end
 
     out = {"rack_available" => true}
+    baseline = module_state_snapshot
+    before = Object.constants
+    features = $LOADED_FEATURES.dup # audition:disable global-variables
     begin
       app = Rack::Builder.parse_file(config_ru)
       app = app.first if app.is_a?(Array)
@@ -364,6 +520,16 @@ module AuditionHarness
     rescue Exception => e
       out["main_boot_error"] = describe_error(e)
     end
+    # The main-process boot defines the app's constant graph;
+    # sweeping it gives rack targets the same backstop as require
+    # and rails targets. A failed boot still sweeps what loaded.
+    out.merge!(merge_reopened(
+      scan(Object.constants - before, root: root,
+        limit: payload["max_constants"]), baseline
+    ))
+    out["native_extensions"] = native_extensions(
+      features, root, payload["known_compiled"]
+    )
 
     out["ractor_boot_call"] = rack_in_ractor(config_ru)
     if out["ractor_boot_call"]["ok"]
@@ -445,20 +611,53 @@ module AuditionHarness
 
   # -- rails -------------------------------------------------------
 
+  # The prober sets BUNDLE_GEMFILE to the target's Gemfile; the
+  # target's gems must resolve before its boot files load. A
+  # setup failure propagates: it is the true boot failure, and
+  # the standard reporting captures it. Bundler.setup is called
+  # directly because bundler/setup exits on failure, swallowing
+  # the message.
+  def bundler_setup
+    return unless ENV["BUNDLE_GEMFILE"]
+
+    require "bundler" # audition:disable runtime-require
+    Bundler.ui.silence { Bundler.setup }
+  end
+
+  # A boot failure does not abandon the sweep: everything defined
+  # before the failure is still scanned, so the probe reports what
+  # it could reach alongside the boot error.
   def rails(payload)
     environment = payload.fetch("environment")
+    bundler_setup
+    baseline = module_state_snapshot
     before = Object.constants
     features = $LOADED_FEATURES.dup # audition:disable global-variables
     started = Time.now
-    require environment # audition:disable runtime-require
+    boot_error = nil
     begin
-      Rails.application.eager_load!
-    rescue Exception
-      nil
+      # Absolute requires keep the path as given; realpathing it
+      # keeps own-vs-dependency attribution honest under symlinked
+      # roots (macOS /var).
+      require realpath(environment) # audition:disable runtime-require
+      begin
+        Rails.application.eager_load!
+      rescue Exception
+        nil
+      end
+    rescue Exception => e
+      boot_error = describe_error(e)
     end
-    boot = {"ok" => true,
-            "seconds" => (Time.now - started).round(1)}
-    scan(Object.constants - before, root: payload["root"]).merge(
+    boot =
+      if boot_error
+        {"ok" => false, "error" => boot_error}
+      else
+        {"ok" => true, "seconds" => (Time.now - started).round(1)}
+      end
+    merge_reopened(
+      scan(Object.constants - before, root: payload["root"],
+        limit: payload["max_constants"]), baseline
+    ).merge(
       "boot" => boot,
       "native_extensions" => native_extensions(
         features, payload["root"], payload["known_compiled"]

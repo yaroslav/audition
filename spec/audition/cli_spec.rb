@@ -182,6 +182,23 @@ RSpec.describe Audition::CLI do
     end
   end
 
+  it "rates findings under a configured test dir as test code" do
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "qa"))
+      File.write(File.join(dir, "qa", "case.rb"), "$x = 1\n")
+
+      default, plain, = run(dir, "--static-only")
+      File.write(File.join(dir, ".audition.yml"),
+        "test_dirs:\n  - qa\n")
+      _, tagged, = run(dir, "--static-only")
+
+      expect(plain).not_to include("(tests)")
+      expect(default).to eq(1)
+      expect(tagged).to include("(tests)")
+      expect(tagged).to include("1 test finding")
+    end
+  end
+
   it "supports the baseline adoption workflow" do
     Dir.mktmpdir do |dir|
       path = File.join(dir, "bad.rb")
@@ -358,13 +375,31 @@ RSpec.describe Audition::CLI do
     end
   end
 
-  it "zebra-stripes the sweep table on interactive terminals" do
+  it "colors sweep rows by verdict, foreground only" do
     Dir.mktmpdir do |dir|
-      lock = stub_sweep(dir, [sweep_row, sweep_row(name: "zz")])
+      lock = stub_sweep(dir, [
+        sweep_row(name: "baddy", verdict: :not_ready, errors: 3),
+        sweep_row(name: "goody", verdict: :ready, warnings: 0)
+      ])
 
       _, out, = tty_run(lock, "--static-only")
 
-      expect(out).to match(/\e\[[0-9;]*48;2;/)
+      expect(out).to include("\e[31m")
+      expect(out).not_to match(/48;2;/)
+    end
+  end
+
+  it "blanks clean counts and glyphs the sweep verdicts" do
+    Dir.mktmpdir do |dir|
+      lock = stub_sweep(dir, [
+        sweep_row(name: "goody", verdict: :ready, warnings: 0)
+      ])
+
+      _, out, = run(lock, "--static-only")
+
+      expect(out).to include("ok ready")
+      expect(out).to include("Audition bundle sweep")
+      expect(out).not_to match(/\|\s+0\s+\|/)
     end
   end
 

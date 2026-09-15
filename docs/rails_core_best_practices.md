@@ -227,7 +227,7 @@ rare path, db27b67b), and Uncountables stopped subclassing Array
   reverted wholesale after merging (261cec84). Freezing shared
   state can regress behavior; expect rollbacks.
 
-## What this means for audition
+## What this means for Audition
 
 Detection already aligned: mutable and shallow-frozen constants,
 class-level ivar state on the graph, proc constants, global
@@ -255,7 +255,7 @@ Refreshed on 2026-08-22 against rails/rails `main` at 2a2db1e8d6
 with the same selection over `cba6112015..origin/main`: 52
 commits by message, 48 by pickaxe, 61 unique without merges,
 every one read in full (`git show --stat -p`) by four parallel
-readers; claims that touch audition's own behavior were then
+readers; claims that touch Audition's own behavior were then
 re-verified on Ruby 4.0.6. The volume sits in Active Record
 model schema, Action View templates, Active Support
 notifications and callbacks, and routing. Every pattern from the
@@ -352,7 +352,7 @@ populated its nested hashes (4c30e8c6cd). Verified on Ruby
 4.0.6: `Regexp.new`, `Regexp.union`, `String#tr`, `+`, `*`, `%`,
 `format`, `String.new`, and `Symbol#to_s` all return unfrozen,
 unshareable objects, and reading such a constant from a Ractor
-raises. This is now an audition check (see below).
+raises. This is now an Audition check (see below).
 
 ### 15. define_method with a shareable lambda
 
@@ -415,7 +415,7 @@ that the application's entry point requires (c0db4bb1eb,
 
 `ActiveSupport::Ractors.store_if_absent` joined the shim
 (444c16102d) with a Mutex-guarded `Ractor.current[key] ||=`
-fallback, and the mechanical rewrite is exactly what audition
+fallback, and the mechanical rewrite is exactly what Audition
 emits (bf6b888a7b: `@cache = Concurrent::Map.new` to `def
 self.cache = store_if_absent(:key) { Concurrent::Map.new }`,
 `map[k] ||= v` to `compute_if_absent`). New shapes on top of it:
@@ -451,7 +451,7 @@ per-algorithm methods from closures (upstream), and
 `_returning_columns_for_insert` stays on `on_main` because it
 needs a connection.
 
-## What changed in audition after the second pass
+## What changed in Audition after the second pass
 
 - Pattern 14 became a mutable-constants finding with a safe
   `.freeze` autofix: String-only methods on any receiver,
@@ -473,7 +473,7 @@ Declined, deliberately:
 
 - A Rails dialect emitting `ActiveSupport::Ractors.*`. The module
   is `:nodoc:` and documented as disposable once old Rubies drop
-  off; audition keeps emitting plain Ruby.
+  off; Audition keeps emitting plain Ruby.
 - An `on_main` autofix. It needs the ractor-dispatch gem and is
   the last rung of Rails' own ladder.
 - Autofixes for deleting memos or hoisting them into constants.
@@ -491,7 +491,7 @@ engineer leading the Rails ractorization (open, head 58aa1dc).
 The first full gem-side conversion out of that effort, and the
 fix for the residual recorded at the end of the second pass
 ("I18n keeps configuration in class variables"). Method: the
-diff and every review comment read in full, audition run on
+diff and every review comment read in full, Audition run on
 both sides of the PR (static and dynamic), and every Ruby
 semantics claim below re-verified on Ruby 4.0.6.
 
@@ -531,7 +531,7 @@ becomes a frozen alias of the new state plus `deprecate_constant`
 (`RESERVED_KEYS = @reserved_keys`), the plain-Ruby version of
 pattern 8's DeprecatedObjectProxy. And per-Ractor caches get a
 portability guard for pre-3.0 rubies: `if defined?(Ractor)` uses
-`Ractor.current[key] ||=` (the shape audition emits) and the
+`Ractor.current[key] ||=` (the shape Audition emits) and the
 else branch keeps the old class variable. Statically that
 fallback scans as a class-variables error; dynamically the
 branch never runs on 4.0, so the class variable is never even
@@ -559,7 +559,7 @@ author scrapped it himself ("This was wrong. We can't have
 default procs in the hash."). The default-proc rule bites even
 the people leading the Rails effort.
 
-### What audition says about the PR (verified)
+### What Audition says about the PR (verified)
 
 On pre-PR main (547917d), the static scan flags everything the
 PR fixes: RESERVED_KEYS mutable Array plus in-place `<<`,
@@ -573,13 +573,13 @@ a lazy `||=` class-ivar memo that is only safe after the opt-in
 ractorize file runs, and no static scan can see a file the
 application must choose to require.
 
-Three residuals audition catches are real, two worth reporting
+Three residuals Audition catches are real, two worth reporting
 upstream:
 
 - INTERPOLATION_PATTERN lost its `.freeze` in a rebase (the PR
   body claims it is frozen; the first review thread shows the
   freeze existed before the scrapped approach took it away).
-  audition marks it fixable.
+  Audition marks it fixable.
 - `@@fallbacks` survives, and the reader's comment claims class
   variable reads are safe from workers. Reproduced: with the
   fallbacks backend loaded and ractorize applied,
@@ -591,7 +591,7 @@ upstream:
   writes) remain, consistent with the PR's declared "most of
   what Rails needs" scope.
 
-### What this means for audition (third pass)
+### What this means for Audition (third pass)
 
 - Four checks confirmed against a conversion written by the
   people who set the patterns: mutable-constants (including the
@@ -617,7 +617,7 @@ had read: 10 merged after the second pass cutoff and 18 inside
 its window whose commit messages never say ractor and whose
 diffs add no `Ractor` token, because a plain `.freeze`, a
 deleted memo, or an eager require needs neither. All 45 commits
-and every PR discussion were read in full, audition was run on
+and every PR discussion were read in full, Audition was run on
 both sides of the 43 files they touch, and every Ruby claim
 below was re-verified on Ruby 4.0.6. Numbered on from the
 catalog.
@@ -644,7 +644,7 @@ delegate cache frozen once populated, and two `@x ||=
 new.freeze` memos turned into frozen private constants, the
 origin of the shape in pattern 12. Its review also records a
 limit: a memo on `QueryAttribute` "can't be eagerly memoized"
-and was reverted. All of this is now an audition check (see
+and was reverted. All of this is now an Audition check (see
 below).
 
 ### 22. Deleting a memo is a benchmark decision
@@ -664,7 +664,7 @@ state but assigned eagerly in `included`, `inherited`,
 made lazy (`@name || @klass&.table_name`) so the object is cheap
 to build before the table name is known, 1.1x instead of 6x;
 `attribute_method_patterns_cache` assigned eagerly as a
-`Concurrent::Map` in `included` and `inherited`. audition flags
+`Concurrent::Map` in `included` and `inherited`. Audition flags
 that last one as class-level state on the post-PR file, and two
 months later 1a59302e64 (pattern 11) deleted it for a frozen
 index. A reviewer also had the justification comment on the
@@ -715,7 +715,7 @@ writing its class's setting was always a bug
 global). The values still need sharing: the railtie merges user
 config into the rescue tables, `Hash#merge` returns an unfrozen
 hash (verified), and an `after_initialize` block makes them
-shareable explicitly. audition confirms the conversion (all
+shareable explicitly. Audition confirms the conversion (all
 twelve `mattr_accessor`/`cattr_accessor` errors vanish) and then
 reports the seven new module ivars as class-level state, the
 adoption gap the i18n pass recorded: the target shape of the
@@ -747,7 +747,7 @@ inside the block through `self.class`, the late-binding anchor
 of pattern 15. A sibling fix: `Array(options[:on])` captured by
 the transaction callback condition lambdas needed `.freeze`
 (58653), because `Array()` returns a fresh unfrozen array
-(verified). None of this is visible statically; audition
+(verified). None of this is visible statically; Audition
 reports nothing on either side of these files. The boot gate is
 the detector.
 
@@ -788,7 +788,7 @@ with the accepted consequence that subscribers registered on
 main are not seen by workers (the test asserts exactly that;
 shape verified). The same PR moved a `Concurrent::Map` constant
 (`PREFIXED_PARTIAL_NAMES`) behind a `store_if_absent` method,
-pattern 17 applied to a constant; audition was silent on that
+pattern 17 applied to a constant; Audition was silent on that
 constant and now flags it, since `Concurrent::Map` defines no
 `#freeze` at all. The larger rebuild is `SchemaContext` (58578,
 the follow-up to ae739c3854): the context is frozen and made
@@ -854,7 +854,7 @@ the hot path touches before moving it per Ractor. A style note
 from 57859: `shareable_lambda { |x| ... }` in block form, not
 `shareable_lambda(&->(x) { ... })`.
 
-### What audition says about the 28 PRs (verified)
+### What Audition says about the 28 PRs (verified)
 
 Static scan of both sides of the 43 files these PRs touch, with
 the checks as they stood before this pass: 195 findings before,
@@ -863,7 +863,7 @@ the checks as they stood before this pass: 195 findings before,
 `@empty ||= new.freeze` memos clear (`WhereClause`, `Type`);
 `JS_ESCAPE_MAP`'s rebuild and the metadata serializer constants
 clear; the `Concurrent::Map` that 57642 assigned eagerly is
-flagged, and was deleted later. What audition missed, and what
+flagged, and was deleted later. What Audition missed, and what
 changed because of it:
 
 - Nine `Object.new` sentinels, one `BasicObject.new`, three

@@ -292,10 +292,52 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     expect(findings).to be_empty
   end
 
-  it "stays silent on values it cannot classify statically" do
+  it "warns on constants holding unprovable call results" do
     findings = findings_for("SETTINGS = YAML.load_file('config.yml')\n")
 
+    expect(findings.size).to eq(1)
+    finding = findings.first
+    expect(finding.severity).to eq(:warning)
+    expect(finding.message)
+      .to include("SETTINGS", "a YAML.load_file call")
+    expect(finding).not_to be_fixable
+  end
+
+  it "trusts calls that return shareable primitives" do
+    findings = findings_for(<<~RUBY)
+      TTL = 5.minutes.to_i
+      WIDTH = Config.fetch(:width).to_f
+      KEY = ENV.fetch("MODE").to_sym
+      READY = Feature.enabled?
+    RUBY
+
     expect(findings).to be_empty
+  end
+
+  it "sees through Sorbet inline casts" do
+    findings = findings_for(<<~RUBY)
+      # frozen_string_literal: true
+      TYPED = T.let("x", String)
+      LOOSE = T.let(compute, T.untyped)
+      GOOD = T.must(42)
+    RUBY
+
+    expect(findings.map(&:line)).to eq([3])
+    expect(findings.first.message).to include("LOOSE")
+  end
+
+  it "names the literal and fixes inside a Sorbet cast" do
+    code = "# frozen_string_literal: true\n" \
+      "MAP = T.let({a: 1}, T::Hash[Symbol, Integer])\n"
+    findings = findings_for(code)
+
+    expect(findings.size).to eq(1)
+    expect(findings.first.message).to include("Hash")
+    fix = findings.first.autofix
+    expect(fix.unsafe?).to be(false)
+    fixed = code.dup
+    fixed[fix.start_offset...fix.end_offset] = fix.replacement
+    expect(fixed).to include("T.let({a: 1}.freeze,")
   end
 
   it "flags writes through constant paths" do
@@ -385,7 +427,7 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     expect(findings).to be_empty
   end
 
-  it "leaves ambiguous calls on non-literal receivers alone" do
+  it "warns on ambiguous calls on non-literal receivers" do
     findings = findings_for(<<~RUBY)
       # frozen_string_literal: true
       SUM = Totals.sum + 1
@@ -393,7 +435,99 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
       PATH = Settings.dup
     RUBY
 
+    expect(findings.map(&:line)).to eq([2, 3, 4])
+    expect(findings).to all(have_attributes(severity: :warning))
+    expect(findings).to all(satisfy { |f| !f.fixable? })
+  end
+
+  it "stays quiet once the opaque result is frozen later" do
+    findings = findings_for(<<~RUBY)
+      SETTINGS = YAML.load_file("config.yml")
+      SETTINGS.freeze
+    RUBY
+
     expect(findings).to be_empty
+  end
+
+  it "warns when a freeze covers only the surface of opaque values" do
+    findings = findings_for(<<~RUBY)
+      # frozen_string_literal: true
+      COUNTERS = T.let({cache: Stats.build("c")}.freeze, T.untyped)
+      FORMATS = [Mime[:xml], Mime[:json]].freeze
+      EPOCH = T.let(Time.at(0).freeze, Time)
+      CODEC = Encoder.new(0, MAP).freeze
+      CLASSES = [Widget, Gadget].freeze
+    RUBY
+
+    expect(findings.map(&:line)).to eq([2, 3, 4, 5])
+    expect(findings).to all(have_attributes(severity: :warning))
+    expect(findings).to all(satisfy { |f| !f.fixable? })
+    expect(findings.first.message).to include("frozen at the top")
+  end
+
+  it "does not let constant-read keys excuse opaque values" do
+    findings = findings_for(<<~RUBY)
+      CONFIGS = {
+        Sizes::SMALL => Widget.new(a: 1),
+      }.freeze
+    RUBY
+
+    expect(findings.size).to eq(1)
+    expect(findings.first.severity).to eq(:warning)
+    expect(findings.first.message).to include("frozen at the top")
+  end
+
+  it "reports a provably mutable element despite unknown siblings" do
+    findings = findings_for(<<~RUBY)
+      REGISTRY = [Widget, [1]].freeze
+    RUBY
+
+    expect(findings.size).to eq(1)
+    expect(findings.first.severity).to eq(:error)
+    expect(findings.first.message).to include("frozen only")
+  end
+
+  it "warns when a container of opaque values is frozen later" do
+    findings = findings_for(<<~RUBY)
+      ROUTES = {home: Router.build}
+      ROUTES.freeze
+    RUBY
+
+    expect(findings.size).to eq(1)
+    expect(findings.first.severity).to eq(:warning)
+    expect(findings.first.message).to include("frozen at the top")
+  end
+
+  it "trusts indexing into ENV and Sorbet type constructors" do
+    findings = findings_for(<<~RUBY)
+      HOME = ENV["HOME"]
+      LIST = T::Array[String]
+      XML = Mime[:xml]
+    RUBY
+
+    expect(findings.map(&:line)).to eq([3])
+    expect(findings.first.severity).to eq(:warning)
+    expect(findings.first.message).to include("Mime.[]")
+  end
+
+  it "flags indexing into another call's result" do
+    findings = findings_for(<<~RUBY)
+      KEY = Registry.by_name["WIDTH"]
+    RUBY
+
+    expect(findings.map(&:line)).to eq([1])
+    expect(findings.first.severity).to eq(:warning)
+  end
+
+  it "treats frozen File path results as shareable" do
+    findings = findings_for(<<~RUBY)
+      ROOT = File.expand_path("..", __dir__).freeze
+      BARE = File.join("a", "b")
+    RUBY
+
+    expect(findings.map(&:line)).to eq([2])
+    expect(findings.first.severity).to eq(:error)
+    expect(findings.first.message).to include("File.join")
   end
   describe "plain freeze for provably shareable containers" do
     it "appends .freeze when every element is shareable" do
@@ -481,12 +615,23 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     end
 
     it "leaves Object.new with arguments or a block alone" do
-      findings = findings_for(<<~RUBY)
-        WITH_BLOCK = Object.new { }
-        SOMETHING = Widget.new
-      RUBY
+      findings = findings_for("WITH_BLOCK = Object.new { }\n")
 
       expect(findings).to be_empty
+    end
+
+    it "warns on fresh instances of arbitrary classes" do
+      findings = findings_for(<<~RUBY)
+        SOMETHING = Widget.new
+        FROZEN = Widget.new.freeze
+        QUERY = Db::Query.new(name: "q") { |x| x }
+      RUBY
+
+      expect(findings.map(&:line)).to eq([1, 2, 3])
+      expect(findings).to all(have_attributes(severity: :warning))
+      expect(findings.first.message)
+        .to include("SOMETHING", "Widget")
+      expect(findings[1].message).to include("frozen at the top")
     end
   end
 
@@ -525,11 +670,21 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
         # frozen_string_literal: true
         IDS = %w(id id=).to_set.freeze
         DIRS = Set.new([:asc]).freeze
+        SEALED = Set.new(compute).freeze
+      RUBY
+
+      expect(findings).to be_empty
+    end
+
+    it "flags unfrozen Sets built from opaque sources" do
+      findings = findings_for(<<~RUBY)
         DYNAMIC = Set.new(compute)
         MAPPED = Set.new([1]) { |x| x.to_s }
       RUBY
 
-      expect(findings).to be_empty
+      expect(findings.map(&:line)).to eq([1, 2])
+      expect(findings).to all(have_attributes(severity: :error))
+      expect(findings.map(&:message)).to all(include("Set"))
     end
   end
 
@@ -576,6 +731,41 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
       RUBY
 
       expect(findings.first.message).to include("default proc")
+    end
+  end
+
+  describe "begin blocks" do
+    it "classifies a constant by the block's last statement" do
+      findings = findings_for(<<~RUBY)
+        TABLE = begin
+          {a: {b: 1}}
+        end.freeze
+      RUBY
+
+      expect(findings.size).to eq(1)
+      expect(findings.first.message).to include("top level")
+    end
+
+    it "accepts a block whose last statement is shareable" do
+      findings = findings_for(<<~RUBY)
+        LIST = begin
+          [1, 2]
+        end.freeze
+      RUBY
+
+      expect(findings).to be_empty
+    end
+
+    it "leaves a block with a rescue clause alone" do
+      findings = findings_for(<<~RUBY)
+        TABLE = begin
+          {a: {b: 1}}
+        rescue StandardError
+          {}
+        end.freeze
+      RUBY
+
+      expect(findings).to be_empty
     end
   end
 

@@ -16,6 +16,10 @@ module Audition
     #   :proc              lambda or proc
     #   :default_proc      Hash.new with a block; the block
     #                      survives .freeze and stays unshareable
+    #   :instance_new      unfrozen instance of an arbitrary class
+    #   :opaque_call       method call with an unprovable return
+    #   :shallow_opaque    frozen at the top, but what it holds
+    #                      is an unprovable call result
     #   :unknown           cannot tell statically
     class LiteralClassifier
       SYNC_PRIMITIVES = %w[
@@ -51,6 +55,18 @@ module Audition
       ].freeze
       FORMATTERS = %i[format sprintf].freeze
       REGEXP_FACTORIES = %i[new union compile].freeze
+      # File methods returning a fresh path String.
+      FILE_PATH_METHODS = %i[
+        expand_path join dirname basename absolute_path realpath
+      ].freeze
+
+      # Calls returning a shareable primitive on any receiver.
+      SHAREABLE_RETURNS = %i[
+        to_i to_int to_f to_r to_c to_sym size length count
+        bytesize ord hash
+      ].freeze
+      # Sorbet's inline casts, which return their value argument.
+      SORBET_CASTS = %i[let cast must].freeze
 
       # @param frozen_string_literal [Boolean] whether the file has
       #   the frozen_string_literal magic comment
@@ -61,6 +77,7 @@ module Audition
       # @param node [Prism::Node] an expression node
       # @return [Symbol] classification, see class docs
       def classify(node)
+        node = begin_value(node)
         case node
         when Prism::IntegerNode, Prism::FloatNode,
              Prism::RationalNode, Prism::ImaginaryNode,
@@ -94,6 +111,29 @@ module Audition
         end
       end
 
+      # The value an expression hands back once begin blocks
+      # and inline casts are peeled off.
+      def unwrap(node)
+        loop do
+          inner = begin_value(node)
+          inner = cast_value(inner) || inner
+          break node if inner.equal?(node)
+
+          node = inner
+        end
+      end
+
+      # A begin block's value is its last statement. A rescue,
+      # else, or ensure clause can supply a different one, so
+      # only the plain form resolves.
+      def begin_value(node)
+        return node unless node.is_a?(Prism::BeginNode) &&
+          node.rescue_clause.nil? && node.else_clause.nil? &&
+          node.ensure_clause.nil?
+
+        node.statements&.body&.last || node
+      end
+
       # `::Mutex` and `Mutex` are the same constant for matching
       # purposes; the leading colons are stripped.
       def const_name(node)
@@ -103,6 +143,17 @@ module Audition
         when Prism::ConstantPathNode
           node.location.slice.delete_prefix("::")
         end
+      end
+
+      # The value inside a Sorbet inline cast, or nil. The cast
+      # returns its argument, so fixes and type names belong on
+      # the value, not the cast.
+      def cast_value(node)
+        return nil unless node.is_a?(Prism::CallNode)
+        return nil unless const_name(node.receiver) == "T" &&
+          SORBET_CASTS.include?(node.name)
+
+        node.arguments&.arguments&.first
       end
 
       # What `value.freeze` would classify as, for the check to
@@ -165,9 +216,11 @@ module Audition
             return :mutable_container
           end
 
-          :unknown
-        when :[], :to_set
+          name ? :instance_new : :opaque_call
+        when :to_set
           set_kind(node)
+        when :[]
+          index_kind(node)
         when :define
           (const_name(receiver) == "Data") ? :shareable : :unknown
         when :make_shareable
@@ -175,14 +228,46 @@ module Audition
         when :lambda, :proc
           (receiver.nil? && node.block) ? :proc : :unknown
         else
-          :unknown
+          opaque_kind(node)
         end
+      end
+
+      # Catch-all for unrecognized calls: shareable returns pass,
+      # predicates stay silent, everything else is opaque.
+      def opaque_kind(node)
+        return :shareable if SHAREABLE_RETURNS.include?(node.name)
+        return :unknown if node.name.end_with?("?")
+
+        if (value = cast_value(node))
+          return classify(value)
+        end
+
+        :opaque_call
+      end
+
+      # Indexing into a constant, another call's result, or a
+      # fresh instance returns a value of unprovable shareability.
+      # Sorbet type constructors and ENV, whose values are frozen
+      # strings, stay silent.
+      def index_kind(node)
+        owner = const_name(node.receiver)
+        return set_kind(node) if owner == "Set"
+        if owner.nil?
+          receiver_kind = classify(node.receiver)
+          return :opaque_call if %i[opaque_call instance_new]
+            .include?(receiver_kind)
+          return :unknown
+        end
+        return :unknown if owner == "ENV" ||
+          owner == "T" || owner.start_with?("T::")
+
+        :opaque_call
       end
 
       def classify_freeze(node, receiver)
         return :unknown unless node.arguments.nil? && receiver
 
-        case receiver
+        case (receiver = begin_value(receiver))
         when Prism::StringNode
           :shareable
         when Prism::ArrayNode, Prism::HashNode
@@ -194,6 +279,7 @@ module Audition
           when :default_proc then :default_proc
           when :mutable_call then :shareable
           when :mutable_container then frozen_kind(receiver)
+          when :instance_new, :opaque_call then :shallow_opaque
           else :unknown
           end
         else
@@ -214,6 +300,7 @@ module Audition
           owner = const_name(receiver)
           (name == :new && owner == "String") ||
             (owner == "Kernel" && FORMATTERS.include?(name)) ||
+            (owner == "File" && FILE_PATH_METHODS.include?(name)) ||
             STRING_ONLY_METHODS.include?(name)
         else
           false
@@ -243,12 +330,12 @@ module Audition
       end
 
       # A Set built from literals is a container of them:
-      # `Set.new([...])`, `Set[...]`, `%w[...].to_set`. Anything
-      # else, such as `Set.new(compute)` or a mapping block,
-      # stays unknown.
+      # `Set.new([...])`, `Set[...]`, `%w[...].to_set`. A Set
+      # built from an opaque source or a mapping block is still
+      # a fresh unfrozen Set, mutable no matter its contents.
       def set_kind(node)
         elements = set_elements(node)
-        elements ? elements_kind(elements) : :unknown
+        elements ? elements_kind(elements) : :mutable_container
       end
 
       def set_elements(node)
@@ -308,20 +395,33 @@ module Audition
         body && body.size == 1 && body[0]
       end
 
-      # Fold element classifications: everything provably shareable
-      # gives :shareable; anything provably mutable gives
-      # :shallow_freeze; a sync primitive poisons the whole
-      # container; anything unknowable gives :unknown (stay silent
-      # rather than guess).
+      # Fold element classifications by the strongest evidence:
+      # a sync primitive poisons the whole container; a provably
+      # mutable element makes it :shallow_freeze; an opaque call
+      # result makes it :shallow_opaque. A bare constant read is
+      # commonly a class or another frozen constant, so on its
+      # own it keeps the container silent (:unknown), but it
+      # cannot excuse a bad element elsewhere.
+      VERDICT_RANK = {
+        shareable: 0, unknown: 1, shallow_opaque: 2,
+        shallow_freeze: 3
+      }.freeze
+
       def deep_classify(elements)
         verdict = :shareable
         elements.each do |element|
           element_children(element).each do |child|
-            case classify(child)
-            when :shareable then nil
-            when :sync_primitive then return :sync_primitive
-            when :unknown then return :unknown
-            else verdict = :shallow_freeze
+            kind =
+              case classify(child)
+              when :shareable then :shareable
+              when :sync_primitive then return :sync_primitive
+              when :unknown then :unknown
+              when :instance_new, :opaque_call, :shallow_opaque
+                :shallow_opaque
+              else :shallow_freeze
+              end
+            if VERDICT_RANK[kind] > VERDICT_RANK[verdict]
+              verdict = kind
             end
           end
         end

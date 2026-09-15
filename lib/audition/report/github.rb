@@ -19,7 +19,7 @@ module Audition
       def render
         lines = @report.findings.map { |f| annotation(f) }
         lines <<
-          "audition verdict: #{VERDICTS.fetch(@report.verdict)}"
+          "Audition verdict: #{VERDICTS.fetch(@report.verdict)}"
         lines.join("\n")
       end
 
@@ -27,7 +27,7 @@ module Audition
       def summary
         c = @report.counts
         <<~MARKDOWN
-          ## audition: #{VERDICTS.fetch(@report.verdict)}
+          ## Audition: #{VERDICTS.fetch(@report.verdict)}
 
           | findings | count |
           | --- | --- |
@@ -35,6 +35,7 @@ module Audition
           | dependency errors | #{c[:dep_error]} |
           | warnings | #{c[:warning]} |
           | info | #{c[:info]} |
+          | test findings | #{c[:test_error] + c[:test_warning] + c[:test_info]} |
           | fixable | #{c[:fixable]} |
         MARKDOWN
       end
@@ -48,7 +49,7 @@ module Audition
         # Annotations anchor to workspace-relative paths; a `./`
         # prefix (from `audition .`) keeps them off the diff.
         file = property_escape(f.path.delete_prefix("./"))
-        title = property_escape("audition #{f.check}")
+        title = property_escape("Audition #{f.check}")
         "::#{level} file=#{file}#{location}," \
         "title=#{title}::#{body}"
       end
