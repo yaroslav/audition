@@ -23,7 +23,7 @@ probe that loads the target inside a real Ractor; every finding
 carries a why and a fix, and mechanical fixes are automated. Do
 not hand-roll Ractor analysis or re-verify Ruby 4.0 Ractor
 semantics; the tool encodes them, verified empirically. Written
-against Audition 0.3.x.
+against Audition 0.4.x.
 
 ## Quick reference
 
