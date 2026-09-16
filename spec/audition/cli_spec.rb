@@ -26,6 +26,31 @@ RSpec.describe Audition::CLI do
     end
   end
 
+  it "retires static findings the dynamic probe proves shareable" do
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "proven_gem.gemspec"), "")
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      File.write(File.join(dir, "lib/proven_gem.rb"), <<~RUBY)
+        # frozen_string_literal: true
+
+        module ProvenGem
+          ENCODING = Encoding.find("UTF-8")
+          @registry = {"a" => 1}.freeze
+
+          def self.registry = @registry
+        end
+      RUBY
+
+      status, out, = run("--plain", dir)
+
+      expect(out).not_to include("shareability unproven")
+      expect(out).to include("@registry")
+      expect(out).to include("shareable in the dynamic probe")
+      expect(out).not_to include("not ractor-ready")
+      expect(status).to eq(0)
+    end
+  end
+
   it "passes a clean script with exit 0" do
     Dir.mktmpdir do |dir|
       path = File.join(dir, "ok.rb")

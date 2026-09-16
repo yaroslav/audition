@@ -66,12 +66,16 @@ module Audition
   #   @return [Boolean] see {#dependency?}
   # @!attribute [r] test
   #   @return [Boolean] see {#test?}
+  # @!attribute [r] subject
+  #   @return [String, nil] the object a finding is about, in a
+  #     form the dynamic probe can match ("Owner/@ivar"), so a
+  #     runtime proof of shareability can retire the static guess
   Finding = Data.define(
     :check, :severity, :message, :why, :fix,
-    :path, :line, :source, :autofix, :dependency, :test
+    :path, :line, :source, :autofix, :dependency, :test, :subject
   ) do
     def initialize(source: nil, autofix: nil, dependency: false,
-      test: false, **rest)
+      test: false, subject: nil, **rest)
       super
     end
 

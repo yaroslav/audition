@@ -189,6 +189,7 @@ module Audition
         )
       end
 
+      findings = Reconciliation.apply(findings, results)
       all = findings +
         filter(results.flat_map(&:findings), directives, config)
 

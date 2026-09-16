@@ -774,6 +774,7 @@ module Audition
             finding_at(
               defn,
               check: "class-level-state",
+              subject: "#{owner}/#{variable}",
               severity: :info,
               message: "frozen memoization #{variable} on " \
                        "#{owner}; warm it on the main Ractor",
@@ -784,6 +785,7 @@ module Audition
             finding_at(
               defn,
               check: "class-level-state",
+              subject: "#{owner}/#{variable}",
               severity: :warning,
               message: "best-effort frozen state #{variable} " \
                        "on #{owner}",
@@ -794,6 +796,7 @@ module Audition
             finding_at(
               defn,
               check: "class-level-state",
+              subject: "#{owner}/#{variable}",
               severity: (verdict == :proxied) ? :warning : :info,
               message: "memoization #{variable} on #{owner} " \
                        "proxied to the main Ractor",
@@ -804,6 +807,7 @@ module Audition
             finding_at(
               defn,
               check: "class-level-state",
+              subject: "#{owner}/#{variable}",
               message: "class-level instance variable " \
                        "#{variable} on #{owner}",
               why: STATE_WHY,
@@ -841,7 +845,8 @@ module Audition
               fix: STATE_FIX,
               path: path,
               line: line,
-              source: source_line(path, line)
+              source: source_line(path, line),
+              subject: "#{owner}/@#{ivar}"
             )
           end
         end
@@ -879,7 +884,8 @@ module Audition
               fix: STATE_FIX,
               path: path,
               line: line,
-              source: source_line(path, line)
+              source: source_line(path, line),
+              subject: "#{owner}/@#{name}"
             )
           end
         end
@@ -944,7 +950,8 @@ module Audition
               fix: STATE_FIX,
               path: path,
               line: line,
-              source: source_line(path, line)
+              source: source_line(path, line),
+              subject: "#{owner}/#{ivar}"
             )
           end
         end
@@ -982,7 +989,8 @@ module Audition
               fix: STATE_FIX,
               path: path,
               line: line,
-              source: source_line(path, line)
+              source: source_line(path, line),
+              subject: "#{owner}/#{ivar}"
             )
           end
         end
@@ -1238,7 +1246,7 @@ module Audition
       end
 
       def finding_at(defn, check:, message:, why:, fix:,
-        severity: :error)
+        severity: :error, subject: nil)
         path = path_from_uri(defn.location.uri)
         line = defn.location.start_line + 1
         Finding.new(
@@ -1249,7 +1257,8 @@ module Audition
           fix: fix,
           path: path,
           line: line,
-          source: source_line(path, line)
+          source: source_line(path, line),
+          subject: subject
         )
       end
 

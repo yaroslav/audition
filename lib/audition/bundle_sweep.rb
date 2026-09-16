@@ -80,6 +80,7 @@ module Audition
       findings = filter(static_findings(target, config),
         directives, config)
       results = dynamic_results(target)
+      findings = Reconciliation.apply(findings, results)
       findings += filter(results.flat_map(&:findings),
         directives, config)
       report = Report.new(
