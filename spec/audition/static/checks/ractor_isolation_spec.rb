@@ -77,6 +77,111 @@ RSpec.describe Audition::Static::Checks::RactorIsolation do
     expect(findings).to be_empty
   end
 
+  describe "blocks Rails tries to make shareable" do
+    it "flags a callback block capturing a mutable local" do
+      findings = findings_for(<<~RUBY)
+        # frozen_string_literal: true
+
+        class Post < ActiveRecord::Base
+          prefix = +"Draft: "
+          before_create { title.prepend(prefix) }
+        end
+      RUBY
+
+      expect(findings.size).to eq(1)
+      finding = findings.first
+      expect(finding.line).to eq(5)
+      expect(finding.severity).to eq(:warning)
+      expect(finding.message).to include("before_create")
+      expect(finding.message).to include("prefix")
+      expect(finding.why).to include("shareable_proc")
+      expect(finding.fix).to include("freeze")
+    end
+
+    it "accepts a callback capturing a frozen literal" do
+      findings = findings_for(<<~RUBY)
+        # frozen_string_literal: true
+
+        class Post < ActiveRecord::Base
+          prefix = "Draft: "
+          count = 3
+          before_create { title.prepend(prefix * count) }
+        end
+      RUBY
+
+      expect(findings).to be_empty
+    end
+
+    it "flags a captured local that is assigned twice" do
+      findings = findings_for(<<~RUBY)
+        # frozen_string_literal: true
+
+        class Post < ActiveRecord::Base
+          prefix = "Draft: "
+          prefix = "Final: " if published?
+          after_save { prefix }
+        end
+      RUBY
+
+      expect(findings.size).to eq(1)
+      expect(findings.first.message).to include("reassigned")
+    end
+
+    it "flags Ractor.shareable_proc captures as errors" do
+      findings = findings_for(<<~RUBY)
+        class Filters
+          registry = []
+          HANDLER = Ractor.shareable_proc { registry }
+          READER = ActiveSupport::Ractors.shareable_lambda { registry }
+        end
+      RUBY
+
+      expect(findings.map(&:line)).to eq([3, 4])
+      expect(findings).to all(have_attributes(severity: :error))
+      expect(findings.first.why).to include("IsolationError")
+    end
+
+    it "resolves locals assigned inside an included block" do
+      findings = findings_for(<<~RUBY)
+        module Auditable
+          included do
+            inner = []
+            after_save { inner << id }
+          end
+        end
+      RUBY
+
+      expect(findings.size).to eq(1)
+      expect(findings.first.message).to include("inner")
+    end
+
+    it "stays quiet on captures it cannot classify" do
+      findings = findings_for(<<~RUBY)
+        class Post < ActiveRecord::Base
+          def self.install(prefix)
+            before_save { prefix }
+          end
+
+          options = compute_options
+          after_save { options }
+        end
+      RUBY
+
+      expect(findings).to be_empty
+    end
+
+    it "ignores blocks on unrelated methods" do
+      findings = findings_for(<<~RUBY)
+        class Post
+          list = []
+          %w[a b].each { |name| list << name }
+        end
+      RUBY
+
+      expect(findings).to be_empty
+    end
+  end
+
   # The parallel scan runs every check inside worker Ractors; the
   # capture scanner must stay callable there or the whole scan
   # falls back to serial.
