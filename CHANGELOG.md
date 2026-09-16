@@ -2,15 +2,39 @@
 
 ## [Unreleased]
 
-- Constants built from `Array#join` on an array literal, or on a
-  chain of array methods rooted in one
-  (`[MAJOR, MINOR, PRE].compact.join(".")`), from `Symbol#to_s`,
-  and from a unary-plus string are now mutable-constants errors
-  with a safe `.freeze` autofix, where they were unproven
-  warnings. `-"str"` and `:sym.name` classify as shareable. The
-  `[8, 2, 0].join(".")` version string is the canonical shape;
-  on the installed gem set it turns up in about twenty
-  constants.
+- The constant classifier knows the return-type contracts of
+  core methods, and a spec executes the tables against the
+  running Ruby so no entry can drift. A call whose core contract
+  is a newly allocated object is now an error where it was an
+  unproven warning: Enumerable and Hash methods that allocate on
+  every core receiver (`.map`, `.keys`, `.merge`,
+  `.each_with_object({})`, `.flatten`, `.select`), set operators
+  with a literal operand (`BASE + [:x]`, `PREFIX + "s"`), `.dup`,
+  strings a core method builds (`[8, 2, 0].join(".")`,
+  `:sym.to_s`, `/re/.source`, `+"str"`), and string splitters
+  whose elements stay unfrozen under a bare `.freeze`
+  (`".*".chars.freeze`). A Method or UnboundMethod in a constant
+  (`Module.instance_method(:name)`) is an error no freeze can
+  fix. Fresh strings get the safe `.freeze` autofix; fresh
+  containers the unsafe `Ractor.make_shareable` wrap. In the
+  other direction, integer arithmetic (`1024 * 1024`, `1 << 30`,
+  `LIMIT - 1`), comparisons, negation, `-"str"` and `:sym.name`
+  now classify as shareable and stop warning. Calls on a class or
+  module (`Settings.dup`) keep their warning: a class method has
+  no core contract. Across the 470 installed gems, unproven
+  constant warnings fall from 1663 to 996, and 281 constants
+  that raise from a worker are errors.
+- New check `instance-memoization`, for the one instance-level
+  lazy memo that is provable statically. A class whose
+  initialize ends by freezing self (or by
+  `Ractor.make_shareable(self)`) cannot memoize lazily: every
+  `@x ||=` in an instance method is an error, since the first
+  call raises FrozenError. A class with a `freeze` override is
+  expected to be frozen, so a memo the override does not warm
+  (by calling the memoizing method or assigning the ivar before
+  `super`) is a warning; warming it there is the
+  compute-on-freeze pattern. Class-level memos stay with the
+  graph audit.
 - Copy-on-write advice (`class_attribute`, class-level state,
   registry mutation) now separates a plain `.freeze` for
   shareable elements from `Ractor.make_shareable` for additions

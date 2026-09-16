@@ -94,6 +94,11 @@ the natural place.
 the memoized value is shareable; prefer deleting or warming the
 memo.
 
+`instance-memoization` is the compute-on-freeze rule: a class
+that freezes itself in initialize cannot memoize lazily (move
+the value into initialize), and a class with a `freeze`
+override must warm every memo inside it before `super`.
+
 On a Rails target, `runtime-unshareable-proc` names a callback
 block Rails could not make shareable, at the Proc's definition
 site; fix the capture (freeze the local, inline it, or hoist a

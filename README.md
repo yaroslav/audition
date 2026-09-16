@@ -28,13 +28,13 @@ core itself is being ractorized; see the
   (which rule of the Ractor model it violates) and a `fix`
   (what to write instead).
 - **`--fix` like RuboCop, in two tiers.** Safe corrections:
-  `.freeze` on string constants (literals as well as the strings
-  `Array#join` and `Symbol#to_s` build), sentinels, and containers
-  whose elements are all shareable, and boot-time hoisting of
+  `.freeze` on string constants (literals as well as the fresh
+  strings core methods return), sentinels, and containers whose
+  elements are all shareable, and boot-time hoisting of
   method-body requires. `--fix-unsafe` adds semantics-affecting
   rewrites: `Ractor.make_shareable(...)` for the remaining mutable
-  and shallow-frozen containers and for Proc constants,
-  magic-comment insertion,
+  and shallow-frozen containers, for containers a core method
+  allocates, and for Proc constants, magic-comment insertion,
   freeze-on-memoize for class-level memoization (both `@x ||=`
   and `return @x if defined?(@x)` idioms keep their caching, the
   memoized value becomes shareable, Rails-core style;
@@ -331,11 +331,22 @@ Static, with file:line precision:
 - **Constants that are not deeply shareable**: bare mutable
   literals, interpolated strings, the subtle shallow freeze
   (`[[1], [2]].freeze` still raises; Audition explains why), and
-  call results the magic comment never covers (`X.tr(":", "")`,
-  `[8, 2, 0].join(".")`, `:sym.to_s`, `+"str"`, `Regexp.new`,
-  `Regexp.union`, `format`), the shapes Rails fixed last in its
-  own ractorization. Honors `# frozen_string_literal:` and
-  `# shareable_constant_value:` magic comments.
+  call results the magic comment never covers, from the
+  return-type contracts of core methods: fresh strings
+  (`X.tr(":", "")`, `[8, 2, 0].join(".")`, `Regexp.new`,
+  `format`), fresh containers (`TYPES.keys`, `LIST.map { }`,
+  `BASE + [:x]`, `DEFAULTS.merge(...)`, `.dup`), string splitters
+  under a shallow freeze (`".*".chars.freeze`), and Method
+  objects, which no freeze makes shareable. A spec executes the
+  tables against the running Ruby. Integer arithmetic,
+  comparisons, and negation are recognized as shareable. Honors
+  `# frozen_string_literal:` and `# shareable_constant_value:`
+  magic comments.
+- **Instance memoization on classes that get frozen**: a lazy
+  `@x ||=` on a class whose initialize freezes self raises
+  FrozenError on first use; on a class with a `freeze` override
+  the memo must be warmed inside the override before `super`
+  (compute on freeze), and one left cold is reported.
 - **Sync primitives and Procs in constants** (Mutex, Queue,
   lambdas), including `Hash.new { }` default procs, which stay
   unshareable even after `.freeze`.

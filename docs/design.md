@@ -110,11 +110,13 @@ holding a hash of unfrozen arrays, and a shallow-frozen singleton.
   (blocks capturing outer locals, off Prism's exact scope depths), `RuntimeRequire`
   (require/autoload at runtime), `UnsafeCalls` (knowledge-base driven: Rails
   class-level macros, sync primitives, removed APIs...), `UnshareableReads`,
-  `DependencyClassState`. Subclass `Base` and `Checks.register` to add one.
+  `DependencyClassState`, `InstanceMemoization` (lazy memos on classes that freeze
+  their instances). Subclass `Base` and `Checks.register` to add one.
 - `Audition::Static::LiteralClassifier`; classifies an expression node by shareability
-  (`:shareable`, `:mutable_container`, `:shallow_freeze`, `:proc`, `:default_proc`,
-  `:opaque_call`, `:shallow_opaque`...); the shared vocabulary under the constant
-  checks.
+  (`:shareable`, `:mutable_container`, `:fresh_container`, `:shallow_freeze`, `:proc`,
+  `:default_proc`, `:unshareable_object`, `:opaque_call`, `:shallow_opaque`...); the
+  shared vocabulary under the constant checks. Its return-type tables for core
+  methods are executed against the running Ruby by their spec.
 - `Audition::Static::GraphAudit`; the rubydex-graph pass: `class-variables`,
   `class-level-state` (including singleton attributes, writes through them, and
   the companion module a concern puts on the class),

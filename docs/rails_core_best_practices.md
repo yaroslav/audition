@@ -919,14 +919,23 @@ Audition's reading of the catalog was too shallow.
 
 The post opens with `VERSION = [8, 2, 0].join(".")`, which is
 Rails' own version string shape, and which Rails fixed on main
-after the post. Verified: `Array#join`, `.compact.join`,
-`%w[].join`, `Symbol#to_s`, and `+"str"` all return unfrozen
-Strings, reading such a constant from a worker raises, and
-`-"str"` and `Symbol#name` return frozen ones. Pattern 14 had
-listed `.tr`, `Regexp.new` and `format`; Audition rated a joined
-array an unproven warning with no autofix. On the installed gem
-set the shape appears in about twenty constants, most of them
-version strings, some already frozen by their authors.
+after the post. The shape itself is rare; the class it belongs
+to is not. A tally over the 27,849 constants in the 470 installed
+gems put 1663 in the "call result, unproven" bucket, and reading
+them showed most follow a core contract: Enumerable and Hash
+methods that allocate on every receiver (`.map`, `.keys`,
+`.merge`, `.each_with_object({})`, `.flatten`), set operators
+with a literal operand (`BASE + [:x]`), `.dup`, string builders
+(`.join`, `Symbol#to_s`, `Regexp#source`, `+"str"`), splitters
+whose elements stay unfrozen under `.freeze` (`.chars.freeze`),
+and Method objects, which never share even frozen; and, in the
+other direction, integer arithmetic, comparisons and negation,
+which are shareable and were pure noise. Verified on 4.0.6 by a
+spec that executes each table entry on sample receivers. The
+boundary is the receiver: a call on a class or module is a
+user-defined class method with no contract and stays unproven.
+After the change the unproven bucket holds 996, and 281
+constants that raise from a worker are errors.
 
 ### 31. Read-copy-update is deep
 
@@ -969,12 +978,17 @@ The post's three memoization cures (delete, compute on `freeze`,
 compute in `initialize`) address instance objects that
 `Ractor.make_shareable(app)` reaches. Verified: the memo raises
 FrozenError on first use after the freeze, and the `freeze`
-override that calls the reader before `super` fixes it. No
-static rule fits (most objects are never frozen), and Audition's
-Rails probe never froze the application, so this whole class
-went unobserved. The probe now calls `ractorize!` where it
-exists and serves a request on the main Ractor and inside a
-worker afterwards.
+override that calls the reader before `super` fixes it. Most
+objects are never frozen, so no general static rule fits, and
+the Rails probe now calls `ractorize!` where it exists and
+serves a request on the main Ractor and inside a worker
+afterwards. Two shapes are provable from the class alone,
+though, and are now the `instance-memoization` check: a class
+whose initialize ends by freezing self (pattern 13) cannot
+memoize lazily at all, and a class with a `freeze` override
+(pattern 5) has declared that it will be frozen, so a memo the
+override does not warm before `super` is the bug the post's
+TaggedLogging fix removed.
 
 ### 35. Public constants move behind keyword defaults
 
