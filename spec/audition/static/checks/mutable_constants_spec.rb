@@ -229,6 +229,14 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
     expect(findings).to all(have_attributes(severity: :warning))
     expect(findings.first.message).to include("RENDERERS")
     expect(findings.first.fix).to include("freeze")
+    expect(findings.first.fix).to include("Ractor.make_shareable")
+    expect(findings.first.fix).to include("keyword")
+  end
+
+  it "names the keyword-default move for public mutable constants" do
+    findings = findings_for("HTTP_METHODS = %w[GET POST]\n")
+
+    expect(findings.first.fix).to include("keyword")
   end
 
   it "leaves mutator-named calls on class constants alone" do
@@ -763,6 +771,102 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
         rescue StandardError
           {}
         end.freeze
+      RUBY
+
+      expect(findings).to be_empty
+    end
+  end
+
+  describe "strings built by joining an array literal" do
+    it "flags the joined version string as a fixable error" do
+      code = <<~RUBY
+        # frozen_string_literal: true
+        VERSION = [8, 2, 0].join(".")
+      RUBY
+      findings = findings_for(code)
+
+      expect(findings.size).to eq(1)
+      finding = findings.first
+      expect(finding.severity).to eq(:error)
+      expect(finding.message).to include("Array#join")
+      fix = finding.autofix
+      expect(fix.unsafe?).to be(false)
+      fixed = code.dup
+      fixed[fix.start_offset...fix.end_offset] = fix.replacement
+      expect(fixed).to end_with('VERSION = [8, 2, 0].join(".").freeze' + "\n")
+    end
+
+    it "follows a chain of array methods back to the literal" do
+      findings = findings_for(<<~RUBY)
+        STRING = [MAJOR, MINOR, TINY, PRE].compact.join(".")
+        WORDS = %w[a b].map(&:upcase).join("-")
+      RUBY
+
+      expect(findings.map(&:line)).to eq([1, 2])
+      expect(findings).to all(have_attributes(severity: :error))
+      expect(findings.map(&:fixable?)).to all(be(true))
+    end
+
+    it "keeps join on an unknown receiver a warning" do
+      findings = findings_for(<<~RUBY)
+        PARTS = SEGMENTS.join(".")
+      RUBY
+
+      expect(findings.size).to eq(1)
+      expect(findings.first.severity).to eq(:warning)
+    end
+
+    it "accepts the joined string once frozen" do
+      findings = findings_for(<<~RUBY)
+        VERSION = [8, 2, 0].join(".").freeze
+      RUBY
+
+      expect(findings).to be_empty
+    end
+  end
+
+  describe "strings made from symbol literals" do
+    it "flags Symbol#to_s as a fixable error" do
+      code = "NAME = :audition.to_s\n"
+      findings = findings_for(code)
+
+      expect(findings.size).to eq(1)
+      finding = findings.first
+      expect(finding.severity).to eq(:error)
+      expect(finding.message).to include("Symbol#to_s")
+      fix = finding.autofix
+      expect(fix.unsafe?).to be(false)
+      fixed = code.dup
+      fixed[fix.start_offset...fix.end_offset] = fix.replacement
+      expect(fixed).to eq("NAME = :audition.to_s.freeze\n")
+    end
+
+    it "treats Symbol#name as shareable" do
+      findings = findings_for("NAME = :audition.name\n")
+
+      expect(findings).to be_empty
+    end
+  end
+
+  describe "unary string operators" do
+    it "flags a unary plus string and freezes it in parentheses" do
+      code = <<~RUBY
+        # frozen_string_literal: true
+        BUFFER = +"draft"
+      RUBY
+      findings = findings_for(code)
+
+      expect(findings.size).to eq(1)
+      expect(findings.first.severity).to eq(:error)
+      fix = findings.first.autofix
+      fixed = code.dup
+      fixed[fix.start_offset...fix.end_offset] = fix.replacement
+      expect(fixed).to end_with('BUFFER = (+"draft").freeze' + "\n")
+    end
+
+    it "treats a unary minus string as shareable" do
+      findings = findings_for(<<~RUBY)
+        KEY = -"draft"
       RUBY
 
       expect(findings).to be_empty

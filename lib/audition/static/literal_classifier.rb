@@ -51,7 +51,15 @@ module Audition
       # and numbers define these too and return shareable values.
       STRING_LITERAL_METHODS = %i[
         + * % upcase downcase capitalize swapcase reverse dup
-        succ next
+        succ next +@
+      ].freeze
+      # Array methods that hand back another Array, so a `.join`
+      # at the end of the chain still joins the literal it
+      # started from (`[MAJOR, MINOR, PRE].compact.join(".")`).
+      ARRAY_CHAIN_METHODS = %i[
+        compact map collect flatten uniq sort sort_by reverse
+        reject select filter flat_map take drop rotate shuffle
+        grep grep_v first last
       ].freeze
       FORMATTERS = %i[format sprintf].freeze
       REGEXP_FACTORIES = %i[new union compile].freeze
@@ -173,6 +181,36 @@ module Audition
         end
       end
 
+      # The Array literal a call chain starts from, when every
+      # link keeps it an Array; nil for any other receiver.
+      def array_root(node)
+        loop do
+          case node
+          when Prism::ArrayNode
+            return node
+          when Prism::CallNode
+            return nil unless ARRAY_CHAIN_METHODS.include?(node.name)
+
+            node = node.receiver
+          else
+            return nil
+          end
+        end
+      end
+
+      # The core class whose method a fresh-string call names, for
+      # the finding's display: Array#join, Symbol#to_s, String#tr.
+      def fresh_string_owner(node)
+        receiver = node.receiver
+        if node.name == :join && array_root(receiver)
+          "Array"
+        elsif receiver.is_a?(Prism::SymbolNode)
+          "Symbol"
+        else
+          "String"
+        end
+      end
+
       private
 
       # Adjacent literals ("a" "b") parse as interpolation but
@@ -194,6 +232,13 @@ module Audition
           fresh_regexp?(node)
 
         receiver = node.receiver
+        # `-"str"` interns a frozen copy and `:sym.name` returns
+        # the interned frozen String (verified on 4.0.6).
+        return :shareable if node.name == :-@ &&
+          receiver.is_a?(Prism::StringNode)
+        return :shareable if node.name == :name &&
+          receiver.is_a?(Prism::SymbolNode)
+
         case node.name
         when :freeze
           classify_freeze(node, receiver)
@@ -290,6 +335,13 @@ module Audition
       def fresh_string?(node)
         receiver = node.receiver
         name = node.name
+        # Array#join and Symbol#to_s build a fresh String every
+        # call; the magic comment never reaches them (the
+        # `[8, 2, 0].join(".")` version string).
+        return true if name == :join && array_root(receiver)
+        return true if name == :to_s &&
+          receiver.is_a?(Prism::SymbolNode)
+
         case receiver
         when nil
           FORMATTERS.include?(name)

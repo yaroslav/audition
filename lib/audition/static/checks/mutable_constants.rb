@@ -46,7 +46,11 @@ module Audition
                "shareable; otherwise make it deeply shareable with " \
                "`# shareable_constant_value: literal` or " \
                "Ractor.make_shareable(...), since a bare " \
-               "`.freeze` is shallow."
+               "`.freeze` is shallow. A public constant that " \
+               "applications mutate keeps its name and is read " \
+               "through an initialize keyword default into an " \
+               "ivar, so a shareable instance carries a frozen " \
+               "copy; mutating the constant is then deprecated."
 
         explain :shallow_freeze,
           severity: :error,
@@ -153,12 +157,16 @@ module Audition
                "freeze it (each_with_object then .freeze), " \
                "or move the registry behind a writer that " \
                "rebuilds and refreezes on each change " \
-               "(copy-on-write). A " \
+               "(copy-on-write; Ractor.make_shareable when the " \
+               "additions may be unfrozen). A " \
                "registry that plugins extend during boot is " \
                "frozen in the last boot hook (after_initialize) " \
                "rather than at definition, and writes after the " \
                "freeze merge into a fresh frozen copy with a " \
-               "deprecation instead of raising."
+               "deprecation instead of raising. A public " \
+               "constant that applications mutate keeps its " \
+               "name and is read through an initialize keyword " \
+               "default into an ivar; mutating it is deprecated."
 
         on :constant_write_node, :constant_or_write_node do |node|
           examine(node.name.to_s, node, node.value)
@@ -366,7 +374,9 @@ module Audition
           return call.name.to_s if call.receiver.nil?
 
           owner = classifier.const_name(call.receiver)
-          owner ? "#{owner}.#{call.name}" : "String##{call.name}"
+          return "#{owner}.#{call.name}" if owner
+
+          "#{classifier.fresh_string_owner(call)}##{call.name}"
         end
 
         # The receiver is arbitrary, often a chain, so the
@@ -385,9 +395,10 @@ module Audition
         end
 
         # `.freeze` binds tighter than an operator: `"a" + "b".freeze`
-        # freezes only "b", so operator calls get parentheses while
-        # literals and parenthesized or argument-free calls take
-        # the bare suffix.
+        # freezes only "b" and `+"a".freeze` dups the frozen
+        # literal back into a mutable one, so operator and unary
+        # calls get parentheses while literals and parenthesized
+        # or argument-free calls take the bare suffix.
         def bare_freezable?(value)
           case value
           when Prism::StringNode, Prism::InterpolatedStringNode,
@@ -396,6 +407,8 @@ module Audition
           when Prism::ArrayNode
             !value.opening_loc.nil?
           when Prism::CallNode
+            return false if value.name.end_with?("@")
+
             !value.opening_loc.nil? ||
               (!value.receiver.nil? && value.arguments.nil?)
           else
