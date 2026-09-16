@@ -11,6 +11,11 @@ module Audition
     #   :mutable_call      unfrozen String, Regexp, or sentinel
     #                      Object returned by a call (`.tr`,
     #                      `format`, `Regexp.new`, `Object.new`)
+    #   :fresh_container   unfrozen Array or Hash a core method
+    #                      allocates on any receiver (`.map`,
+    #                      `.keys`, `.merge`, `X + [..]`, `.dup`)
+    #   :unshareable_object a Method or UnboundMethod, never
+    #                      shareable even frozen
     #   :shallow_freeze    frozen container with mutable elements
     #   :sync_primitive    Mutex/Queue/... constructor
     #   :proc              lambda or proc
@@ -45,8 +50,13 @@ module Audition
       # to String alone in core, so any receiver qualifies.
       STRING_ONLY_METHODS = %i[
         tr tr_s gsub sub squeeze strip lstrip rstrip chomp chop
-        center ljust rjust encode scrub unicode_normalize
+        center ljust rjust encode scrub unicode_normalize b
       ].freeze
+      # Fresh Strings off a literal receiver: `to_s` on anything
+      # but a String (String#to_s returns self), `inspect` on any
+      # literal, and a Regexp literal's source.
+      STRINGIFIERS = %i[to_s inspect].freeze
+      REGEXP_LITERAL_METHODS = %i[source to_s inspect].freeze
       # Unambiguous only on a String literal receiver: Symbols
       # and numbers define these too and return shareable values.
       STRING_LITERAL_METHODS = %i[
@@ -72,6 +82,50 @@ module Audition
       SHAREABLE_RETURNS = %i[
         to_i to_int to_f to_r to_c to_sym size length count
         bytesize ord hash
+      ].freeze
+
+      # Return-type contracts of core methods, executed against
+      # the running Ruby by literal_classifier_spec so no entry can
+      # drift from what Ruby does. Each list names methods whose
+      # result, on every core receiver that defines them, is a
+      # newly allocated object of the stated kind.
+      FRESH_ARRAY_METHODS = %i[
+        map collect flat_map collect_concat filter_map grep grep_v
+        partition sort sort_by uniq flatten reverse rotate shuffle
+        zip product take drop take_while drop_while entries keys
+        values values_at
+      ].freeze
+      FRESH_HASH_METHODS = %i[
+        merge invert transform_values transform_keys tally group_by
+        except
+      ].freeze
+      # Array on an Array or Range, Hash on a Hash; fresh either way.
+      FRESH_CONTAINER_METHODS = %i[select filter reject compact].freeze
+      # Arrays of freshly allocated Strings: a `.freeze` on the
+      # result is shallow.
+      FRESH_STRING_ARRAYS = %i[chars lines split scan].freeze
+      # Arrays of Integers: a `.freeze` on the result is enough.
+      SHAREABLE_ELEMENT_ARRAYS = %i[bytes codepoints].freeze
+      # Method objects are unshareable and freezing does not help
+      # (verified on Ruby 4.0.6).
+      METHOD_OBJECTS = %i[
+        method instance_method public_method public_instance_method
+      ].freeze
+      # Booleans, nil, or an Integer on any receiver.
+      COMPARISONS = %i[== != < > <= >= <=> === !].freeze
+      # Numeric on a Numeric receiver, whatever the operand.
+      ARITHMETIC = %i[+ - * / % ** << >> & | ^].freeze
+      # Numeric on any receiver given a numeric literal operand: no
+      # core container accepts a number there. Array and String
+      # repeat with `*`, String formats with `%`, Array appends
+      # with `<<`, so those three stay unproven.
+      OPERAND_TYPED = (ARITHMETIC - %i[* % <<]).freeze
+      # Operators whose result takes its type from a literal
+      # operand: `X + [..]` is an Array, `X + "s"` a String.
+      SET_OPERATORS = %i[+ - | &].freeze
+      NUMERIC_LITERALS = [
+        Prism::IntegerNode, Prism::FloatNode, Prism::RationalNode,
+        Prism::ImaginaryNode
       ].freeze
       # Sorbet's inline casts, which return their value argument.
       SORBET_CASTS = %i[let cast must].freeze
@@ -206,9 +260,42 @@ module Audition
           "Array"
         elsif receiver.is_a?(Prism::SymbolNode)
           "Symbol"
+        elsif receiver.is_a?(Prism::RegularExpressionNode)
+          "Regexp"
+        elsif NUMERIC_LITERALS.any? { |type| receiver.is_a?(type) }
+          "Integer"
+        elsif receiver.is_a?(Prism::ArrayNode)
+          "Array"
+        elsif receiver.is_a?(Prism::HashNode)
+          "Hash"
         else
           "String"
         end
+      end
+
+      # What a fresh-container call allocates, for display.
+      def fresh_type(node)
+        name = node.name
+        return "Hash" if FRESH_HASH_METHODS.include?(name)
+        return "copy" if name == :dup
+        if name == :each_with_object
+          return literal_container_type(first_argument(node))
+        end
+        if SET_OPERATORS.include?(name)
+          return literal_container_type(first_argument(node))
+        end
+        return "container" if FRESH_CONTAINER_METHODS.include?(name)
+
+        "Array"
+      end
+
+      # Whether a fresh container's elements are provably mutable
+      # (split strings), provably shareable (bytes), or unknown.
+      def fresh_elements(node)
+        return :mutable if FRESH_STRING_ARRAYS.include?(node.name)
+        return :shareable if SHAREABLE_ELEMENT_ARRAYS.include?(node.name)
+
+        :unknown
       end
 
       private
@@ -230,12 +317,12 @@ module Audition
       def classify_call(node)
         return :mutable_call if fresh_string?(node) ||
           fresh_regexp?(node)
+        return :unshareable_object if METHOD_OBJECTS.include?(node.name)
+        return :shareable if shareable_operator?(node)
+        return :fresh_container if fresh_container?(node)
 
         receiver = node.receiver
-        # `-"str"` interns a frozen copy and `:sym.name` returns
-        # the interned frozen String (verified on 4.0.6).
-        return :shareable if node.name == :-@ &&
-          receiver.is_a?(Prism::StringNode)
+        # `:sym.name` returns the interned frozen String.
         return :shareable if node.name == :name &&
           receiver.is_a?(Prism::SymbolNode)
 
@@ -322,14 +409,105 @@ module Audition
           # String or Regexp from a call is deeply shareable.
           case classify(receiver)
           when :default_proc then :default_proc
+          when :unshareable_object then :unshareable_object
           when :mutable_call then :shareable
           when :mutable_container then frozen_kind(receiver)
+          when :fresh_container then frozen_fresh_kind(receiver)
           when :instance_new, :opaque_call then :shallow_opaque
           else :unknown
           end
         else
           :unknown
         end
+      end
+
+      # A frozen fresh container is as shareable as its elements.
+      def frozen_fresh_kind(call)
+        case fresh_elements(call)
+        when :shareable then :shareable
+        when :mutable then :shallow_freeze
+        else :shallow_opaque
+        end
+      end
+
+      def first_argument(node)
+        node.arguments&.arguments&.first
+      end
+
+      def literal_container_type(node)
+        case node
+        when Prism::ArrayNode then "Array"
+        when Prism::HashNode, Prism::KeywordHashNode then "Hash"
+        else "container"
+        end
+      end
+
+      def literal_container?(node)
+        node.is_a?(Prism::ArrayNode) || node.is_a?(Prism::HashNode) ||
+          node.is_a?(Prism::KeywordHashNode)
+      end
+
+      # Comparisons and negation on anything, unary minus on
+      # anything (a Numeric, or a String's frozen copy), arithmetic
+      # on a numeric expression, which stays numeric whatever the
+      # operand, and the operand-typed operators with a numeric
+      # literal operand on anything.
+      def shareable_operator?(node)
+        name = node.name
+        return true if COMPARISONS.include?(name)
+        return true if name == :-@ && node.receiver
+        return false unless ARITHMETIC.include?(name)
+        return true if numeric_expression?(node.receiver)
+
+        OPERAND_TYPED.include?(name) &&
+          numeric_expression?(first_argument(node))
+      end
+
+      def numeric_expression?(node)
+        return false if node.nil?
+
+        node = begin_value(node)
+        case node
+        when *NUMERIC_LITERALS
+          true
+        when Prism::ParenthesesNode
+          body = node.body&.body
+          !body.nil? && body.size == 1 && numeric_expression?(body[0])
+        when Prism::CallNode
+          (ARITHMETIC.include?(node.name) ||
+            %i[-@ +@].include?(node.name)) &&
+            numeric_expression?(node.receiver)
+        else
+          false
+        end
+      end
+
+      # A call whose core contract is a newly allocated container:
+      # the table methods on any receiver, `each_with_object` with
+      # a literal memo, a set operator with a literal operand, and
+      # `dup`.
+      def fresh_container?(node)
+        receiver = node.receiver
+        # A call on a class or module is a user-defined class
+        # method with no core contract; values (SCREAMING
+        # constants, literals, chains, locals) follow the core one.
+        # Nothing in the tables applies to a number.
+        return false if receiver.nil? || class_like?(receiver) ||
+          numeric_expression?(receiver)
+
+        name = node.name
+        argument = first_argument(node)
+        return literal_container?(argument) if name == :each_with_object
+        if SET_OPERATORS.include?(name)
+          return argument.is_a?(Prism::ArrayNode)
+        end
+        return node.arguments.nil? if name == :dup
+
+        FRESH_ARRAY_METHODS.include?(name) ||
+          FRESH_HASH_METHODS.include?(name) ||
+          FRESH_CONTAINER_METHODS.include?(name) ||
+          FRESH_STRING_ARRAYS.include?(name) ||
+          SHAREABLE_ELEMENT_ARRAYS.include?(name)
       end
 
       def fresh_string?(node)
@@ -339,8 +517,10 @@ module Audition
         # call; the magic comment never reaches them (the
         # `[8, 2, 0].join(".")` version string).
         return true if name == :join && array_root(receiver)
-        return true if name == :to_s &&
-          receiver.is_a?(Prism::SymbolNode)
+        return true if literal_stringifier?(node)
+        # `X + "suffix"` is a String whatever X is.
+        return true if name == :+ && receiver &&
+          string_literal?(first_argument(node))
 
         case receiver
         when nil
@@ -362,6 +542,39 @@ module Audition
       def fresh_regexp?(node)
         REGEXP_FACTORIES.include?(node.name) &&
           const_name(node.receiver) == "Regexp"
+      end
+
+      # A constant reference that names a class or module rather
+      # than a value: any segment that is not SCREAMING_CASE.
+      def class_like?(node)
+        name = const_name(node)
+        !name.nil? && !name.split("::").last.match?(/\A[A-Z0-9_]+\z/)
+      end
+
+      def string_literal?(node)
+        node.is_a?(Prism::StringNode) ||
+          node.is_a?(Prism::InterpolatedStringNode)
+      end
+
+      # `to_s` and `inspect` on a Symbol, number, Regexp, Array or
+      # Hash literal, `inspect` on a String literal, and a Regexp
+      # literal's `source` all allocate (String#to_s returns self).
+      def literal_stringifier?(node)
+        receiver = node.receiver
+        name = node.name
+        return false unless node.arguments.nil?
+
+        case receiver
+        when Prism::RegularExpressionNode
+          REGEXP_LITERAL_METHODS.include?(name)
+        when Prism::StringNode, Prism::InterpolatedStringNode
+          name == :inspect
+        when Prism::SymbolNode, Prism::ArrayNode, Prism::HashNode,
+             *NUMERIC_LITERALS
+          STRINGIFIERS.include?(name)
+        else
+          false
+        end
       end
 
       # A container holding a sync primitive can never become

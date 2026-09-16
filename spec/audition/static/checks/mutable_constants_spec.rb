@@ -438,7 +438,7 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
   it "warns on ambiguous calls on non-literal receivers" do
     findings = findings_for(<<~RUBY)
       # frozen_string_literal: true
-      SUM = Totals.sum + 1
+      SUM = Totals.sum * 2
       NAME = Label.upcase
       PATH = Settings.dup
     RUBY
@@ -871,6 +871,153 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
 
       expect(findings).to be_empty
     end
+  end
+
+  describe "calls that return a fresh container" do
+    it "flags Enumerable and Hash results as unfrozen containers" do
+      findings = findings_for(<<~RUBY)
+        KEYS = TYPES.keys
+        NAMES = VERBS.map(&:to_s)
+        MERGED = DEFAULTS.merge(a: 1)
+        LOOKUP = VERBS.each_with_object({}) { |v, h| h[v] = 1 }
+        FLAT = PRECEDENCE.flatten
+      RUBY
+
+      expect(findings.map(&:line)).to eq([1, 2, 3, 4, 5])
+      expect(findings).to all(have_attributes(severity: :error))
+      expect(findings[0].message).to include("unfrozen Array")
+      expect(findings[0].message).to include(".keys")
+      expect(findings[2].message).to include("unfrozen Hash")
+      expect(findings[3].message).to include("unfrozen Hash")
+      fix = findings[0].autofix
+      expect(fix.replacement).to eq("Ractor.make_shareable(TYPES.keys)")
+      expect(fix.unsafe?).to be(true)
+    end
+
+    it "types set operators by their literal operand" do
+      findings = findings_for(<<~RUBY)
+        # frozen_string_literal: true
+        ALL = BASE + [:x]
+        REST = BASE - [:x]
+        UNION = BASE | %w[a]
+        NAME = PREFIX + "_suffix"
+      RUBY
+
+      expect(findings.map(&:line)).to eq([2, 3, 4, 5])
+      expect(findings).to all(have_attributes(severity: :error))
+      expect(findings[0].message).to include("unfrozen Array")
+      expect(findings[3].message).to include("unfrozen String")
+      fix = findings[3].autofix
+      expect(fix.unsafe?).to be(false)
+      expect(fix.replacement).to eq('(PREFIX + "_suffix").freeze')
+    end
+
+    it "keeps a frozen fresh container an unproven warning" do
+      findings = findings_for(<<~RUBY)
+        KEYS = TYPES.keys.freeze
+        LOOKUP = VERBS.each_with_object({}) { |v, h| h[v] = 1 }.freeze
+      RUBY
+
+      expect(findings.map(&:line)).to eq([1, 2])
+      expect(findings).to all(have_attributes(severity: :warning))
+      expect(findings.first.message).to include("unproven")
+    end
+
+    it "knows string splitters yield unfrozen elements" do
+      findings = findings_for(<<~RUBY)
+        # frozen_string_literal: true
+        CHARS = ".*+?".chars.freeze
+        WORDS = "a b".split.freeze
+        BYTES = "ab".bytes.freeze
+        RAW = "ab".bytes
+      RUBY
+
+      expect(findings.map(&:line)).to eq([2, 3, 5])
+      expect(findings[0].message).to include("top level")
+      expect(findings[0].severity).to eq(:error)
+      expect(findings[2].autofix.unsafe?).to be(false)
+    end
+
+    it "flags an unfrozen copy" do
+      findings = findings_for("COPY = DEFAULTS.dup\n")
+
+      expect(findings.size).to eq(1)
+      expect(findings.first.severity).to eq(:error)
+      expect(findings.first.message).to include(".dup")
+    end
+
+    it "leaves ambiguous conversions and element reads unproven" do
+      findings = findings_for(<<~RUBY)
+        LIST = RANGE.to_a
+        FIRST = LIST.first
+      RUBY
+
+      expect(findings).to all(have_attributes(severity: :warning))
+    end
+  end
+
+  describe "calls that return shareable values" do
+    it "stays quiet on arithmetic over numeric literals" do
+      findings = findings_for(<<~RUBY)
+        SIZE = 1024 * 1024
+        FLAG = 1 << 30
+        LIMIT = (2**20) - 1
+        RATIO = 10.0 / 3
+        NEG = -LIMIT
+      RUBY
+
+      expect(findings).to be_empty
+    end
+
+    it "types arithmetic by a numeric literal operand" do
+      findings = findings_for(<<~RUBY)
+        LIMIT = WAITING_WRITER - 1
+        MASK = FLAGS & 0xFF
+        SHIFTED = BASE >> 2
+        REPEATED = ROW * 3
+        FORMATTED = TEMPLATE % 3
+        SIZE = 140.bytes
+      RUBY
+
+      expect(findings.map(&:line)).to eq([4, 5, 6])
+      expect(findings).to all(have_attributes(severity: :warning))
+    end
+
+    it "stays quiet on comparisons and negation" do
+      findings = findings_for(<<~RUBY)
+        MODERN = RUBY_VERSION >= "4.0"
+        OFF = !DEBUG
+        ORDER = "a" <=> "b"
+      RUBY
+
+      expect(findings).to be_empty
+    end
+  end
+
+  it "flags Method objects as never shareable" do
+    findings = findings_for(<<~RUBY)
+      NAME = Module.instance_method(:name)
+      PLUS = 1.method(:+)
+    RUBY
+
+    expect(findings.map(&:line)).to eq([1, 2])
+    expect(findings).to all(have_attributes(severity: :error))
+    expect(findings.first.message).to include("never shareable")
+    expect(findings.first.fixable?).to be(false)
+    expect(findings.first.fix).to include("Symbol")
+  end
+
+  it "treats strings made from literal receivers as fresh" do
+    findings = findings_for(<<~RUBY)
+      SOURCE = /[a-z]+/.source
+      LABEL = 42.to_s
+      SHOWN = :sym.inspect
+      BINARY = "\r\n".b
+    RUBY
+
+    expect(findings.map(&:line)).to eq([1, 2, 3, 4])
+    expect(findings).to all(have_attributes(severity: :error))
+    expect(findings.map(&:fixable?)).to all(be(true))
   end
 
   it "flags Concurrent::Map constants as never shareable" do

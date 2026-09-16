@@ -37,6 +37,33 @@ module Audition
                "BasicObject has no #freeze: use " \
                "Object.new.freeze for such a sentinel."
 
+        explain :fresh_container,
+          severity: :error,
+          message: "constant %{name} holds an unfrozen %{type} " \
+                   "returned by %{method}",
+          why: "The call allocates a new %{type} on every core " \
+               "receiver that defines it, and " \
+               "`# frozen_string_literal: true` covers literals " \
+               "only, so the constant holds an unfrozen object " \
+               "and a non-main Ractor reading it raises " \
+               "Ractor::IsolationError.",
+          fix: "Make the value deeply shareable at definition " \
+               "time with Ractor.make_shareable(...), or append " \
+               "`.freeze` when every element is itself shareable, " \
+               "since a bare `.freeze` is shallow."
+
+        explain :unshareable_object,
+          severity: :error,
+          message: "constant %{name} holds a Method object from " \
+                   "%{method}, which is never shareable",
+          why: "Method and UnboundMethod objects are not " \
+               "Ractor-shareable and freezing one does not help " \
+               "(verified on Ruby 4.0); a non-main Ractor reading " \
+               "this constant raises Ractor::IsolationError.",
+          fix: "Store the method name as a Symbol and look the " \
+               "method up where it is called, or keep the Method " \
+               "object per-Ractor with Ractor.store_if_absent."
+
         explain :mutable_container,
           severity: :error,
           message: "constant %{name} holds a mutable %{type} " \
@@ -221,6 +248,19 @@ module Audition
             flag(node, :mutable_container, name: name,
               type: container_type(value),
               autofix: fix_ok ? freeze_container(value) : nil)
+          when :fresh_container
+            # A later bare freeze settles the top level; only
+            # provably mutable elements are still worth a report.
+            unless frozen_later?(name) &&
+                classifier.fresh_elements(value) != :mutable
+              flag(node, :fresh_container, name: name,
+                type: classifier.fresh_type(value),
+                method: call_display(value),
+                autofix: fix_ok ? freeze_fresh(value) : nil)
+            end
+          when :unshareable_object
+            flag(node, :unshareable_object, name: name,
+              method: call_display(value))
           when :shallow_freeze
             flag(node, :shallow_freeze, name: name,
               autofix:
@@ -371,12 +411,28 @@ module Audition
         end
 
         def call_display(call)
-          return call.name.to_s if call.receiver.nil?
+          name = call.name
+          return "the #{name} operator" if name.match?(/\A[^a-z_]/i)
+          return name.to_s if call.receiver.nil?
 
           owner = classifier.const_name(call.receiver)
-          return "#{owner}.#{call.name}" if owner
+          return "#{owner}.#{name}" if owner
+          return ".#{name}" unless literal_receiver?(call)
 
-          "#{classifier.fresh_string_owner(call)}##{call.name}"
+          "#{classifier.fresh_string_owner(call)}##{name}"
+        end
+
+        def literal_receiver?(call)
+          receiver = call.receiver
+          receiver.is_a?(Prism::StringNode) ||
+            receiver.is_a?(Prism::InterpolatedStringNode) ||
+            receiver.is_a?(Prism::SymbolNode) ||
+            receiver.is_a?(Prism::RegularExpressionNode) ||
+            receiver.is_a?(Prism::ArrayNode) ||
+            receiver.is_a?(Prism::HashNode) ||
+            LiteralClassifier::NUMERIC_LITERALS
+              .any? { |type| receiver.is_a?(type) } ||
+            !classifier.array_root(receiver).nil?
         end
 
         # The receiver is arbitrary, often a chain, so the
@@ -456,6 +512,16 @@ module Audition
             replacement: "Object.new.freeze",
             safety: :unsafe
           )
+        end
+
+        # A fresh container's elements are unknown, so the deep
+        # wrap is the fix, except for arrays of Integers.
+        def freeze_fresh(value)
+          if classifier.fresh_elements(value) == :shareable
+            append_freeze(value)
+          else
+            wrap_make_shareable(value)
+          end
         end
 
         # Plain `.freeze` where every element is provably
