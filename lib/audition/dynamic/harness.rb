@@ -5,13 +5,15 @@
 #
 #   ruby harness.rb MODE < payload.json
 #
-# Prints exactly one JSON document on stdout and never raises.
-# Stdlib only; must stay runnable on a bare Ruby 4.0.
+# Prints exactly one Marshal document on stdout and never raises.
+# Stdlib only, and nothing beyond rbconfig loaded before the
+# target: a library the harness required first (json, once)
+# would be swept as pre-existing and its own state never seen.
+# Must stay runnable on a bare Ruby 4.0.
 
 Warning[:experimental] = false
 Thread.report_on_exception = false
 
-require "json"
 require "rbconfig"
 
 module AuditionHarness
@@ -70,19 +72,27 @@ module AuditionHarness
       else {"error" => {"class" => "ArgumentError",
                         "message" => "unknown mode #{mode}"}}
       end
-    out.puts(JSON.generate(result))
+    emit(out, result)
   rescue Exception => e
     begin
-      out.puts(JSON.generate("error" => describe_error(e)))
+      emit(out, "error" => describe_error(e))
     rescue Exception
-      out.puts('{"error":{"class":"HarnessFailure",' \
-               '"message":"unreportable error"}}')
+      emit(out, "error" => {"class" => "HarnessFailure",
+                            "message" => "unreportable error"})
     end
   end
 
+  # One Marshal document: the prober loads it back into the same
+  # strings, arrays, and hashes, binary bytes included.
+  def emit(out, result)
+    out.binmode
+    out.write(Marshal.dump(result))
+    out.flush
+  end
+
   # Exception messages can carry arbitrary bytes (C extensions,
-  # binary filenames); unscrubbed they blow up JSON.generate
-  # inside the rescue and the harness dies without output.
+  # binary filenames); scrubbed to UTF-8 so the report can print
+  # them.
   def describe_error(error)
     root = unwrap(error)
     {"class" => scrub(root.class.name.to_s),
@@ -116,12 +126,13 @@ module AuditionHarness
 
   def in_ractor(*args, &block)
     ractor = Ractor.new(*args, &block)
-    {"ok" => true, "value" => jsonable(ractor.value)}
+    {"ok" => true, "value" => plain_value(ractor.value)}
   rescue Exception => e
     {"ok" => false, "error" => describe_error(e)}
   end
 
-  def jsonable(value)
+  # Only primitives cross the pipe; anything else is described.
+  def plain_value(value)
     case value
     when Numeric, String, Symbol, true, false, nil then value
     else value.inspect[0, 200]
@@ -152,19 +163,33 @@ module AuditionHarness
     Array(payload["load_paths"]).each do |lp|
       $LOAD_PATH.unshift(lp) # audition:disable global-variables
     end
+    root = payload["root"]
+    limit = payload["max_constants"]
+    known = known_paths(payload["known_compiled"])
     baseline = module_state_snapshot
     before = Object.constants
     features = $LOADED_FEATURES.dup # audition:disable global-variables
     require_target(payload.fetch("feature"),
       Array(payload["load_paths"]))
     merge_reopened(
-      scan(Object.constants - before, root: payload["root"],
-        limit: payload["max_constants"]), baseline
+      scan(top_level(before), root: root, limit: limit, known: known),
+      baseline, root: root, limit: limit, known: known
     ).merge(
       "native_extensions" => native_extensions(
-        features, payload["root"], payload["known_compiled"]
+        features, root, payload["known_compiled"]
       )
     )
+  end
+
+  # The top-level constants a load introduced, as scan roots.
+  def top_level(before)
+    (Object.constants - before).map { |name| [Object, name.to_s] }
+  end
+
+  # The target's own compiled files, realpathed like everything
+  # the sweep compares against them.
+  def known_paths(paths)
+    Array(paths).map { |path| realpath(path) }
   end
 
   # Gem names and entry files diverge in two conventional ways:
@@ -206,19 +231,20 @@ module AuditionHarness
   # are inspected for class-level ivars and class variables, then
   # descended into. const_get can raise (autoload failures) and
   # anything can lie; every step is rescued and counted.
-  def scan(root_names, root: nil, limit: nil)
+  def scan(roots, root: nil, limit: nil, known: [])
     # Loaded features are realpathed by require; the target root
     # must be too, or symlinked paths (macOS /var vs /private/var)
     # break the own-vs-dependency comparison.
     root = realpath(root)
     limit = (limit || MAX_CONSTS).to_i
     unshareable = []
+    proven = []
     class_state = []
     class_vars = []
     errors = 0
     truncated = false
     seen = {}
-    queue = root_names.map { |name| [Object, name.to_s] }
+    queue = roots.map { |owner, name| [owner, name.to_s] }
     visited = 0
 
     until queue.empty?
@@ -236,7 +262,7 @@ module AuditionHarness
         next
       end
       full = owner.equal?(Object) ? name : "#{owner}::#{name}"
-      origin = origin_for(owner, name, root)
+      origin = origin_for(owner, name, root, known)
 
       if value.is_a?(Module)
         next if seen[value.object_id]
@@ -249,7 +275,10 @@ module AuditionHarness
         end
       else
         begin
-          unless Ractor.shareable?(value)
+          if Ractor.shareable?(value)
+            # Proof the static pass can retire its guesses with.
+            proven << [origin["path"], origin["line"]] if origin["path"]
+          else
             blocker, blocker_depth = blocker_for(value)
             unshareable << origin.merge(
               "const" => full, "class" => value.class.name,
@@ -264,6 +293,7 @@ module AuditionHarness
     end
 
     {"unshareable_constants" => unshareable,
+     "proven_constants" => proven,
      "class_state" => class_state,
      "class_variables" => class_vars,
      "scanned" => visited,
@@ -274,9 +304,10 @@ module AuditionHarness
 
   # Where was this constant defined, and does that location belong
   # to the audited target (as opposed to a dependency it loaded)?
-  # Unknown locations (C extensions, core) count as own so nothing
-  # gets silently downgraded.
-  def origin_for(owner, name, root)
+  # Unknown locations (core) count as own so nothing gets silently
+  # downgraded, and so does the target's own compiled extension,
+  # which RubyGems installs outside the gem's root.
+  def origin_for(owner, name, root, known = [])
     path, line = begin
       owner.const_source_location(name)
     rescue Exception
@@ -284,9 +315,21 @@ module AuditionHarness
     end
     # The separator matters: /x/app must not claim /x/app-helpers.
     own = root.nil? || path.nil? || path == root ||
+      own_compiled?(path, root, known) ||
       (path.start_with?(root + File::SEPARATOR) &&
         !excluded?(path, root))
     {"path" => path, "line" => line, "own" => own}
+  end
+
+  # A compiled file the target listed, or the copy of it RubyGems
+  # built into its extensions directory, which sits outside the
+  # gem's root under a directory named after the gem
+  # (extensions/<platform>/<abi>/stringio-3.2.0/stringio.bundle).
+  def own_compiled?(path, root, known)
+    return true if known.include?(path) || known.include?(realpath(path))
+    return false unless path.match?(NATIVE) && root
+
+    path.include?(File::SEPARATOR + File.basename(root) + File::SEPARATOR)
   end
 
   # Matches the static scanner's exclusion rule: any excluded or
@@ -397,7 +440,7 @@ module AuditionHarness
       seen[value.object_id] = true
       begin
         snap[value] = [value.instance_variables,
-          value.class_variables(false)]
+          value.class_variables(false), value.constants(false)]
       rescue Exception
         next
       end
@@ -413,17 +456,31 @@ module AuditionHarness
   MACHINERY = /\A(?:Gem|Bundler|RubyVM)(?:::|\z)/
 
   # State the boot added to pre-existing modules, reported through
-  # the same channels as freshly defined class state. No source
-  # location exists for a reopen, and unknown origins count as own.
-  def merge_reopened(result, snapshot)
+  # the same channels as freshly defined class state, and the
+  # constants it added under them, swept like top-level ones
+  # (Ractor::Dispatch lives under the core Ractor class, and the
+  # new-constants sweep never looks there). No source location
+  # exists for a reopen, and unknown origins count as own.
+  def merge_reopened(result, snapshot, root: nil, limit: nil,
+    known: [])
     origin = {"path" => nil, "line" => nil, "own" => true}
-    snapshot.each do |mod, (ivars, cvars)|
+    added = []
+    snapshot.each do |mod, (ivars, cvars, consts)|
+      full = mod.name || mod.inspect
+      next if full.match?(MACHINERY)
+
+      unless mod.equal?(Object)
+        new_consts = begin
+          mod.constants(false) - consts
+        rescue Exception
+          []
+        end
+        new_consts.each { |name| added << [mod, name.to_s] }
+      end
       new_ivars = mod.instance_variables - ivars
       new_cvars = mod.class_variables(false) - cvars
       next if new_ivars.empty? && new_cvars.empty?
 
-      full = mod.name || mod.inspect
-      next if full.match?(MACHINERY)
       if new_ivars.any?
         unshareable = new_ivars.reject do |ivar|
           safe_shareable?(mod.instance_variable_get(ivar))
@@ -439,9 +496,17 @@ module AuditionHarness
           "const" => full, "cvars" => new_cvars.map(&:to_s)
         )
       end
-    rescue Exception
-      next
     end
+    return result if added.empty?
+
+    extra = scan(added, root: root, limit: limit, known: known)
+    %w[unshareable_constants proven_constants class_state
+      class_variables].each do |key|
+      result[key] = Array(result[key]) + extra[key]
+    end
+    result["scanned"] = result["scanned"].to_i + extra["scanned"]
+    result["errors"] = result["errors"].to_i + extra["errors"]
+    result["truncated"] ||= extra["truncated"]
     result
   end
 
@@ -523,9 +588,11 @@ module AuditionHarness
     # The main-process boot defines the app's constant graph;
     # sweeping it gives rack targets the same backstop as require
     # and rails targets. A failed boot still sweeps what loaded.
+    limit = payload["max_constants"]
+    known = known_paths(payload["known_compiled"])
     out.merge!(merge_reopened(
-      scan(Object.constants - before, root: root,
-        limit: payload["max_constants"]), baseline
+      scan(top_level(before), root: root, limit: limit, known: known),
+      baseline, root: root, limit: limit, known: known
     ))
     out["native_extensions"] = native_extensions(
       features, root, payload["known_compiled"]
@@ -665,9 +732,11 @@ module AuditionHarness
       end
     # Freezing first lets the sweep see warmed state as shareable.
     ractorize = boot_error ? nil : ractorize_application
+    limit = payload["max_constants"]
+    known = known_paths(payload["known_compiled"])
     merge_reopened(
-      scan(Object.constants - before, root: root,
-        limit: payload["max_constants"]), baseline
+      scan(top_level(before), root: root, limit: limit, known: known),
+      baseline, root: root, limit: limit, known: known
     ).merge(
       "boot" => boot,
       "ractorize" => ractorize,
@@ -768,7 +837,7 @@ module AuditionHarness
   end
 
   def main_request(app)
-    {"ok" => true, "status" => jsonable(app.call(base_env).first)}
+    {"ok" => true, "status" => plain_value(app.call(base_env).first)}
   rescue Exception => e
     {"ok" => false, "error" => describe_error(e)}
   end
@@ -841,7 +910,7 @@ if $PROGRAM_NAME == __FILE__ # audition:disable global-variables
   real_stdout = $stdout.dup
   $stdout.reopen($stderr)
   mode = ARGV.fetch(0, "capabilities")
-  raw = $stdin.tty? ? "" : $stdin.read
-  payload = raw.empty? ? {} : JSON.parse(raw)
+  raw = $stdin.tty? ? "" : $stdin.binmode.read
+  payload = raw.empty? ? {} : Marshal.load(raw)
   AuditionHarness.main(mode, payload, out: real_stdout)
 end

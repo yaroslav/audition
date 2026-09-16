@@ -371,6 +371,135 @@ RSpec.describe Audition::Dynamic::Prober do
     end
   end
 
+  describe "sweep coverage" do
+    it "sweeps constants a gem adds under a pre-existing namespace" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/nested_probe.rb", <<~RUBY)
+          class Ractor
+            module NestedProbe
+              DIRTY = [1, 2]
+              @state = {}
+            end
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "nested_probe",
+          load_paths: [File.join(dir, "lib")],
+          root: dir
+        )
+
+        dirty = result.findings.find do |f|
+          f.message.include?("Ractor::NestedProbe::DIRTY")
+        end
+        expect(dirty).not_to be_nil
+        expect(dirty.check).to eq("runtime-unshareable-constant")
+        expect(dirty.dependency?).to be(false)
+        state = result.findings.find do |f|
+          f.check == "runtime-class-state" &&
+            f.message.include?("Ractor::NestedProbe")
+        end
+        expect(state).not_to be_nil
+        expect(state.severity).to eq(:error)
+      end
+    end
+
+    it "attributes constants from the target's own compiled files as own" do
+      Dir.mktmpdir do |dir|
+        ext = write(dir, "build/own_ext.rb", <<~RUBY)
+          module OwnExt
+            DIRTY = [1]
+          end
+        RUBY
+        write(dir, "gem/lib/own_gem.rb", <<~RUBY)
+          require #{ext.inspect}
+          module OwnGem
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "own_gem",
+          load_paths: [File.join(dir, "gem/lib")],
+          root: File.join(dir, "gem"),
+          compiled_files: [ext]
+        )
+
+        dirty = result.findings.find do |f|
+          f.message.include?("OwnExt::DIRTY")
+        end
+        expect(dirty).not_to be_nil
+        expect(dirty.dependency?).to be(false)
+      end
+    end
+
+    it "claims the copy RubyGems builds into its extensions dir" do
+      unless defined?(AuditionHarness)
+        load File.expand_path(
+          "../../../lib/audition/dynamic/harness.rb", __dir__
+        )
+      end
+      root = "/gems/gems/stringio-3.2.0"
+      built = "/gems/extensions/arm64/4.0.0/stringio-3.2.0/stringio.bundle"
+
+      expect(AuditionHarness.own_compiled?(built, root, [])).to be(true)
+      expect(AuditionHarness.own_compiled?(
+        "/gems/extensions/arm64/4.0.0/psych-5.5.0/psych.bundle", root, []
+      )).to be(false)
+      expect(AuditionHarness.own_compiled?(
+        "/gems/gems/stringio-3.2.0/lib/stringio.rb", root, []
+      )).to be(false)
+    end
+
+    it "reports the constants it proved shareable with their sites" do
+      Dir.mktmpdir do |dir|
+        path = write(dir, "lib/proven.rb", <<~RUBY)
+          module Proven
+            OK = Object.new.freeze
+            LIST = [1].freeze
+            BAD = [1]
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "proven",
+          load_paths: [File.join(dir, "lib")],
+          root: dir
+        )
+
+        proven = result.raw["proven_constants"].map do |entry|
+          [File.basename(entry[0]), entry[1]]
+        end
+        expect(proven).to include([File.basename(path), 2])
+        expect(proven).to include([File.basename(path), 3])
+        expect(proven).not_to include([File.basename(path), 4])
+      end
+    end
+
+    it "loads no json before the target" do
+      Dir.mktmpdir do |dir|
+        write(dir, "lib/nojson.rb", <<~RUBY)
+          raise "json preloaded" if defined?(::JSON)
+          module Nojson
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :require,
+          feature: "nojson",
+          load_paths: [File.join(dir, "lib")],
+          root: dir
+        )
+
+        expect(result.findings.map(&:message))
+          .not_to include(a_string_including("json preloaded"))
+        expect(result.passed).to be(true)
+      end
+    end
+  end
+
   describe "dependency attribution" do
     it "downgrades findings from dependencies to warnings" do
       Dir.mktmpdir do |own|
@@ -734,7 +863,9 @@ RSpec.describe Audition::Dynamic::Prober do
         result = prober.probe(mode: :rack, config_ru: config_ru)
 
         expect(result.passed).to be(true)
-        expect(result.findings).to be_empty
+        # rack's own Binding constant is a dependency finding, not
+        # the app's.
+        expect(result.findings.reject(&:dependency?)).to be_empty
         concurrency = result.raw.fetch("concurrency")
         expect(concurrency["failures"]).to eq(0)
         served = concurrency["statuses"].values.sum

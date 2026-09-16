@@ -12,15 +12,15 @@ module Audition
     #   @return [Symbol] `:script`, `:require`, `:rack`, `:rails`,
     #     or `:capabilities`
     # @!attribute [r] raw
-    #   @return [Hash] the harness's parsed JSON, verbatim
+    #   @return [Hash] the harness's document, verbatim
     # @!attribute [r] findings
     #   @return [Array<Finding>] findings derived from `raw`
     # @!attribute [r] passed
     #   @return [Boolean] whether the target's own surface passed
     Result = Data.define(:mode, :raw, :findings, :passed)
 
-    # Spawns the harness subprocess per probe mode, parses its JSON,
-    # and converts observations into findings.
+    # Spawns the harness subprocess per probe mode, loads the
+    # document it prints, and converts observations into findings.
     class Prober
       HARNESS = File.expand_path("harness.rb", __dir__).freeze
 
@@ -569,12 +569,12 @@ module Audition
 
       # -- subprocess plumbing -------------------------------------
 
-      # Harness output can carry arbitrary target bytes; force
-      # valid UTF-8 before any string work or a binary exception
-      # message crashes the whole run.
+      # The harness prints one Marshal document; anything else on
+      # its stdout (a crash before the document) is reported with
+      # the tail of its stderr. Stderr can carry arbitrary target
+      # bytes, so it is forced to valid UTF-8 first.
       def run(mode, payload = {}, root: nil)
         out, err, timed_out = execute(mode, payload, root: root)
-        out = sanitize(out)
         err = sanitize(err)
         if timed_out
           return {"error" => {
@@ -582,8 +582,11 @@ module Audition
             "message" => "harness exceeded #{@timeout}s"
           }}
         end
-        JSON.parse(out)
-      rescue JSON::ParserError
+        document = Marshal.load(out)
+        raise TypeError, "not a document" unless document.is_a?(Hash)
+
+        document
+      rescue TypeError, ArgumentError, EOFError
         {"error" => {
           "class" => "HarnessFailure",
           "message" => err.split("\n").last(5).join("; ")
@@ -621,7 +624,8 @@ module Audition
           end
         end
         Open3.popen3(env, *cmd, **opts) do |stdin, stdout, stderr, wait|
-          stdin.write(JSON.generate(payload))
+          stdin.binmode
+          stdin.write(Marshal.dump(payload))
           stdin.close
           out_reader = reader(stdout)
           err_reader = reader(stderr)
