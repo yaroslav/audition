@@ -48,10 +48,13 @@ module Audition
                "same way). Writes always need the main Ractor.",
           fix: "Give it a frozen default (default: [].freeze) " \
                "and write copy-on-write: self.x = (x | [v])" \
-               ".freeze, the idiom Rails applied across Action " \
-               "Pack and Active Record; do every write at boot " \
-               "on the main Ractor. The dynamic probe reports " \
-               "ground truth for the installed Rails."
+               ".freeze when every element is shareable, " \
+               "self.x = Ractor.make_shareable(x | [v]) when the " \
+               "additions may be unfrozen (Symbol#to_s returns " \
+               "an unfrozen String), since a plain freeze is " \
+               "shallow; do every write at boot on the main " \
+               "Ractor. The dynamic probe reports ground truth " \
+               "for the installed Rails."
 
         explain :objectspace_id2ref,
           severity: :warning,

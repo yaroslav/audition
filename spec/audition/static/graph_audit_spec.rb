@@ -162,6 +162,77 @@ RSpec.describe Audition::Static::GraphAudit do
     expect(findings).to all(have_attributes(severity: :error))
   end
 
+  it "tells copy-on-write writers when a plain freeze is shallow" do
+    findings = findings_for(
+      "m.rb" => "module Settings\n  @config = {}\nend\n"
+    )
+
+    expect(findings.first.fix).to include("copy-on-write")
+    expect(findings.first.fix).to include("Ractor.make_shareable")
+  end
+
+  describe "memoization proxied to the main Ractor" do
+    it "downgrades the read-then-proxy shape to a warning" do
+      findings = findings_for(
+        "model.rb" => <<~RUBY
+          class Model
+            class << self
+              def columns
+                @columns || ActiveSupport::Ractors.on_main(self) do
+                  @columns ||= compute
+                end
+              end
+            end
+          end
+        RUBY
+      )
+
+      expect(findings.size).to eq(1)
+      note = findings.first
+      expect(note.check).to eq("class-level-state")
+      expect(note.severity).to eq(:warning)
+      expect(note.message).to include("proxied")
+      expect(note.why).to include("main Ractor")
+      expect(note.fix).to include("shareable")
+    end
+
+    it "notes a proxied memo whose value is frozen" do
+      findings = findings_for(
+        "model.rb" => <<~RUBY
+          class Model
+            def self.columns
+              @columns || Ractor::Dispatch.on_main(self) do
+                @columns ||= compute.freeze
+              end
+            end
+          end
+        RUBY
+      )
+
+      expect(findings.size).to eq(1)
+      expect(findings.first.severity).to eq(:info)
+      expect(findings.first.message).to include("proxied")
+    end
+
+    it "keeps a stray write beside a proxied memo an error" do
+      findings = findings_for(
+        "model.rb" => <<~RUBY
+          class Model
+            def self.columns
+              @columns || ActiveSupport::Ractors.on_main(self) do
+                @columns ||= compute
+              end
+            end
+
+            def self.reset! = (@columns = nil)
+          end
+        RUBY
+      )
+
+      expect(findings).to all(have_attributes(severity: :error))
+    end
+  end
+
   it "does not flag instance-level ivars" do
     findings = findings_for(
       "a.rb" => "class A\n  def x = (@ok = 1)\nend\n"

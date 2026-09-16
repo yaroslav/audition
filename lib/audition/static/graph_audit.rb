@@ -35,11 +35,25 @@ module Audition
         "per-subclass values compute in the inherited hook " \
         "(guard on subclass.name for anonymous classes). For " \
         "collections, rebuild and refreeze on write, " \
-        "copy-on-write: self.list = " \
-        "(list + [item]).freeze; never mutate in place. As a " \
-        "last resort use Ractor.store_if_absent for " \
-        "per-Ractor state, or read the ivar first and proxy " \
-        "the write to the main Ractor."
+        "copy-on-write: self.list = (list + [item]).freeze " \
+        "when every element is shareable, self.list = " \
+        "Ractor.make_shareable(list + [item]) when the " \
+        "additions may be unfrozen, since a plain freeze is " \
+        "shallow; never mutate in place. As a last resort use " \
+        "Ractor.store_if_absent for per-Ractor state, or read " \
+        "the ivar first and proxy the write to the main Ractor."
+      PROXIED_WHY =
+        "The read is the lock-free fast path and the write runs " \
+        "on the main Ractor through on_main, so no non-main " \
+        "Ractor ever writes class state. Every worker waiting " \
+        "on main serializes there, and a worker's next read " \
+        "raises Ractor::IsolationError unless the memoized " \
+        "value is shareable."
+      PROXIED_FIX =
+        "Keep the hatch rare: delete the memo or warm it at " \
+        "boot where possible, and make the computed value " \
+        "deeply frozen inside the block (.freeze or " \
+        "Ractor.make_shareable) so workers can read it."
       FROZEN_MEMO_WHY =
         "Every write memoizes a shareable (frozen) value, so " \
         "non-main Ractors can read it once it has been " \
@@ -776,6 +790,16 @@ module Audition
               why: BEST_EFFORT_WHY,
               fix: BEST_EFFORT_FIX
             )
+          when :proxied, :proxied_frozen
+            finding_at(
+              defn,
+              check: "class-level-state",
+              severity: (verdict == :proxied) ? :warning : :info,
+              message: "memoization #{variable} on #{owner} " \
+                       "proxied to the main Ractor",
+              why: PROXIED_WHY,
+              fix: PROXIED_FIX
+            )
           else
             finding_at(
               defn,
@@ -1308,7 +1332,10 @@ module Audition
 
       # Cross-file merge keeps the weakest promise: any dirty file
       # taints the group, and best-effort beats fully frozen.
-      VERDICT_RANK = {dirty: 0, best_effort: 1, frozen: 2}.freeze
+      VERDICT_RANK = {
+        dirty: 0, best_effort: 1, proxied: 2, proxied_frozen: 3,
+        frozen: 4
+      }.freeze
 
       def weaker_verdict(existing, verdict)
         return verdict unless existing
@@ -1321,6 +1348,9 @@ module Audition
         return :dirty if ops.any? { |op| op[:kind] == :other }
 
         memos = Rewriters::Memoization.memo_sites(ops)
+        if memos.any? && memos.all? { |m| m[:op][:proxied] }
+          return proxied_verdict(ops, memos, classifier)
+        end
         if memos.any?
           return group_frozen?(ops, classifier) ? :frozen : :dirty
         end
@@ -1338,6 +1368,22 @@ module Audition
           best_effort_value?(w[:node].value)
         end
         (all_safe && wrapped) ? :best_effort : :dirty
+      end
+
+      # The read-then-proxy hatch, `@x || on_main(self) { @x ||= v }`:
+      # every write is a memo site inside the block, so the main
+      # Ractor performs it by construction, and the value decides
+      # between a note and a warning. A plain write elsewhere
+      # (a reset) is a worker-side write again.
+      def proxied_verdict(ops, memos, classifier)
+        memo_ops = memos.map { |memo| memo[:op] }
+        writes = ops.select { |op| op[:kind] == :write }
+        return :dirty unless (writes - memo_ops).empty?
+
+        frozen = memos.all? do |memo|
+          frozen_memo_value?(memo[:op][:node].value, classifier)
+        end
+        frozen ? :proxied_frozen : :proxied
       end
 
       # Matches the emitted setter recipe:

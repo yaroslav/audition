@@ -400,6 +400,33 @@ RSpec.describe "unsafe rewriters" do
     end
   end
 
+  it "leaves memos proxied to the main Ractor alone" do
+    Dir.mktmpdir do |dir|
+      source = <<~RUBY
+        # frozen_string_literal: true
+
+        class Model
+          def self.columns
+            @columns || ActiveSupport::Ractors.on_main(self) do
+              @columns ||= compute
+            end
+          end
+
+          def self.names
+            @names ||= compute_names
+          end
+        end
+      RUBY
+      path = write(dir, "model.rb", source)
+
+      fix!(path)
+
+      content = File.read(path)
+      expect(content).to include("@columns ||= compute\n")
+      expect(content).to include("@names ||= Ractor.make_shareable")
+    end
+  end
+
   it "skips constructor memos entirely" do
     Dir.mktmpdir do |dir|
       source = <<~RUBY

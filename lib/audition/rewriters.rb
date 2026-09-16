@@ -227,6 +227,9 @@ module Audition
           kinds = ops.map { |op| op[:kind] }
           next if kinds.include?(:other)
           next if ops.any? { |op| op[:body] }
+          # A memo written inside an on_main block already runs
+          # on the main Ractor; the audit rates the shape itself.
+          next if ops.any? { |op| op[:proxied] }
 
           memos = memo_sites(ops)
           if memos.empty?
@@ -620,7 +623,27 @@ module Audition
           @sclass_depth = 0
           @def_stack = []
           @defined_depth = 0
+          @proxy_depth = 0
           super
+        end
+
+        # A block handed to `on_main` runs on the main Ractor by
+        # construction (the read-then-proxy escape hatch), so the
+        # ivar writes inside it are recorded as proxied.
+        def visit_call_node(node)
+          block = node.block
+          unless node.name == :on_main && block.is_a?(Prism::BlockNode)
+            return super
+          end
+
+          visit(node.receiver) if node.receiver
+          visit(node.arguments) if node.arguments
+          @proxy_depth += 1
+          begin
+            visit(block)
+          ensure
+            @proxy_depth -= 1
+          end
         end
 
         def visit_class_node(node)
@@ -766,7 +789,8 @@ module Audition
             def_id: current_def && current_def[:id],
             def_name: current_def && current_def[:name],
             def_node: current_def && current_def[:node],
-            class_owner: @namespace.last[:kind] == :class
+            class_owner: @namespace.last[:kind] == :class,
+            proxied: @proxy_depth.positive?
           }
         end
       end

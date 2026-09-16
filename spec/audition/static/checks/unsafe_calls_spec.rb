@@ -41,6 +41,7 @@ RSpec.describe Audition::Static::Checks::UnsafeCalls do
     expect(findings).to all(have_attributes(severity: :warning))
     expect(findings.first.why).to include("Rails 8.2")
     expect(findings.first.fix).to include("copy-on-write")
+    expect(findings.first.fix).to include("Ractor.make_shareable")
   end
 
   it "flags include Singleton" do
