@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.1] - Unreleased
 
 - The constant classifier knows the return-type contracts of
   core methods, and a spec executes the tables against the
