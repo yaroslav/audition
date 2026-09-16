@@ -32,7 +32,11 @@ app can run on Ractor-parallel web servers such as [kino](https://github.com/yar
 Static finds latent hazards dynamic can't reach (code paths never executed during a
 probe); dynamic finds truth static can't see (metaprogramming, actual object graphs).
 Neither closes the other's blind spots, so both report, and the check name says which
-layer spoke (`runtime-*` and `dynamic-*` are the probe's).
+layer spoke (`runtime-*` and `dynamic-*` are the probe's). Where the probe reaches a
+static guess, the probe wins: a constant it read as shareable loses its static
+warning, and class-level state it saw holding only shareable values keeps an info
+note instead of an error. Private constants are the one blind spot left on that
+side: `Module#constants` never lists them, so the sweep cannot prove them.
 
 ## Ruby 4.0 Ractor semantics (empirically verified on 4.0.6, 2026-07-17)
 
@@ -129,11 +133,16 @@ holding a hash of unfrozen arrays, and a shallow-frozen singleton.
   is all that is left to report. Taint follows the values from there.
 - `Audition::Static::WorkSplit`; worker count and largest-first work dealing.
 - `Audition::Dynamic::Harness`; standalone script run via `ruby harness.rb <mode>`,
-  stdlib-only, one JSON document out. Modes: `script_main`, `script_ractor`,
+  nothing beyond rbconfig loaded before the target (a library the harness required
+  first would be swept as pre-existing), one Marshal document in and out. Modes:
+  `script_main`, `script_ractor`,
   `require` (namespace walk), `rack`, `rails` (boot, proc gate, `ractorize!`, one
   request on main and one in a Ractor), `capabilities`.
 - `Audition::Dynamic::Prober`; spawns the harness per mode with timeout, parses JSON,
   converts results to findings.
+- `Audition::Reconciliation`; what the probe proved shareable retires the static
+  guesses about the same objects, by constant definition site and by
+  `Owner/@ivar` subject, before the report and the verdict see the findings.
 - `Audition::Fixer` / `Audition::Rewriters`; safe inline autofixes attached to
   findings, applied bottom-up so offsets hold, plus unsafe-tier multi-site rewrites
   planned from a parsed file and its findings. `--dry-run` previews either.

@@ -392,10 +392,15 @@ Dynamic, on the live object graph:
 
 - Runs scripts inside a real Ractor (via `load`, which is not
   proxied) and reports the actual exception.
-- Requires a library, then sweeps every constant it introduced with
+- Requires a library, then sweeps every constant it introduced,
+  under new namespaces and pre-existing ones alike, with
   `Ractor.shareable?`, and inspects every class and module for
   class-level ivars and class variables, with
-  `const_source_location` attribution.
+  `const_source_location` attribution. What the sweep proves
+  shareable retires the static guesses about the same objects:
+  an unproven constant warning disappears, and class-level state
+  that held only shareable values after boot keeps an info note
+  instead of an error.
 - Records every compiled extension the load pulled in,
   dependencies included, and byte-scans each for the
   `rb_ext_ractor_safe` import; silent ones are reported against

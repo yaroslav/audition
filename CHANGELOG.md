@@ -24,6 +24,38 @@
   no core contract. Across the 470 installed gems, unproven
   constant warnings fall from 1663 to 996, and 281 constants
   that raise from a worker are errors.
+- The dynamic probe sweeps constants a load adds under a
+  pre-existing namespace. It used to walk only new top-level
+  constants, so a gem that opens a core class, `Ractor::Dispatch`
+  under `Ractor` say, was never inspected at all and its probe
+  passed on silence. The snapshot now records each loaded
+  module's constants, and whatever a load adds under them is
+  swept like a top-level constant.
+- What the probe proves shareable retires the static guesses
+  about the same objects. Each constant the sweep read as
+  shareable is reported with its definition site, and a static
+  mutable-constants finding at that site is dropped; class-level
+  state whose every value was shareable after boot turns its
+  static errors into info notes that say so, since reads are
+  legal from any Ractor and only a later write would raise. This
+  is the adoption gap the study kept recording, closed: a gem
+  that makes its state shareable at boot now audits as it runs.
+  ractor-dispatch goes from two errors to ready, erb and json
+  keep only the state the probe actually saw unshareable.
+- A gem's own compiled extension is the gem's own. RubyGems
+  builds it into an extensions directory outside the gem root,
+  keyed by the gem's name and version, and the probe attributed
+  constants defined there to a dependency, so stringio,
+  bigdecimal, psych, and racc read as blocked instead of not
+  ready on their own unfrozen version strings defined in C.
+- The harness no longer loads json before the target. Its
+  payload and document travel as Marshal now, so nothing beyond
+  rbconfig is loaded first, and the json gem's own module state
+  is swept like any other: three unfrozen default-options hashes
+  on `JSON` are real errors it had hidden from itself.
+- `X + "suffix"` on an unknown receiver is reported as an
+  unfrozen object rather than a String, since Pathname answers
+  `+` too.
 - New check `instance-memoization`, for the one instance-level
   lazy memo that is provable statically. A class whose
   initialize ends by freezing self (or by

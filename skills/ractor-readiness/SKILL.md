@@ -94,6 +94,13 @@ the natural place.
 the memoized value is shareable; prefer deleting or warming the
 memo.
 
+"Shareable in the dynamic probe" on a class-level-state note
+means the probe saw only shareable values there after boot:
+reads are legal from any Ractor; keep writes on the main
+Ractor. Static warnings on constants the probe proved shareable
+are dropped outright, so a full run (no `--static-only`) is the
+one to trust on a gem that makes its state shareable at boot.
+
 `instance-memoization` is the compute-on-freeze rule: a class
 that freezes itself in initialize cannot memoize lazily (move
 the value into initialize), and a class with a `freeze`

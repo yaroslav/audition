@@ -1008,3 +1008,63 @@ checks nesting the literal sweep of pattern 1 could not. A side
 finding: the README listed `Ractor.make_shareable` wraps under
 the safe fix tier, where the code has always kept them unsafe.
 
+## Sixth pass: gems built for Ractors
+
+Studied 2026-09-16, the reverse of the passes above: instead of
+reading fixes, run Audition over gems that already claim Ractor
+safety and treat every finding there as a suspect. Candidates
+came from gemspecs and READMEs mentioning Ractors and from
+compiled extensions importing `rb_ext_ractor_safe`:
+ractor-dispatch, kino, nosj, carbon_fiber, json, erb, csv,
+stringio, date, bigdecimal, racc, psych, and rbs. Every finding
+was read against the source, and every Audition defect found was
+fixed with a spec.
+
+The static layer held up: nothing it reported on these gems was
+wrong. The dynamic layer had four defects, all found because the
+gems were known good.
+
+- The sweep walked only new top-level constants. ractor-dispatch
+  defines `Ractor::Dispatch` under the core `Ractor` class, so
+  the probe never inspected it and passed on silence, while the
+  static pass rated its `@main` two errors. The executor makes
+  itself shareable in `initialize` (pattern 13), which only a
+  boot can prove. The snapshot now records each loaded module's
+  constants and sweeps whatever a load adds under them.
+- The probe proved things and told no one. kino's frozen
+  singleton constants, csv's `Encoding.find` result, erb's
+  scanner registry, and json's parser and generator settings
+  were all read as shareable at runtime and still carried their
+  static warnings and errors. Every shareable constant is now
+  reported with its definition site and every shareable class
+  ivar by owner, and the static findings at those sites are
+  dropped or downgraded to info before the verdict. This is the
+  adoption gap the second, third, and fourth passes kept
+  recording, closed by the layer that was built to close it.
+- A gem's own compiled extension counted as a dependency.
+  RubyGems builds it into `extensions/<platform>/<abi>/<gem>/`
+  outside the gem root, so the unfrozen version strings stringio,
+  bigdecimal, psych, and racc define in C read as "blocked by
+  dependencies" instead of the gem's own not-ready verdict. A
+  compiled file under a directory named after the target is the
+  target's.
+- The harness loaded json for its own output before the target,
+  so the json gem's module state was pre-existing at snapshot
+  time and never swept. The harness now speaks Marshal, loads
+  nothing beyond rbconfig first, and the probe finds the three
+  unfrozen default-options hashes on `JSON` that Rails' own boot
+  would trip on.
+
+What the safe gems still report is real: csv's converter tables
+hold lambdas, psych stores `Data.instance_method(:initialize)`
+in a constant and an unfrozen options object in another, racc's
+grammar compiler is main-only tooling, rbs keeps loggers and
+mutexes on modules, and every C extension in the set defines an
+unfrozen version string. kino's own code is clean; optparse and
+logger, which its CLI loads on the main Ractor, are not. date is
+the one gem in the set that audits ready with nothing to say.
+
+One limit stays on record: `Module#constants` never lists
+private constants, so a private constant the probe cannot prove
+keeps its static warning (erb's `WARNING_UPLEVEL`, an Integer).
+
