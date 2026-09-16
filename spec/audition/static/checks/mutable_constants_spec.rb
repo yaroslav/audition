@@ -906,7 +906,7 @@ RSpec.describe Audition::Static::Checks::MutableConstants do
       expect(findings.map(&:line)).to eq([2, 3, 4, 5])
       expect(findings).to all(have_attributes(severity: :error))
       expect(findings[0].message).to include("unfrozen Array")
-      expect(findings[3].message).to include("unfrozen String")
+      expect(findings[3].message).to include("unfrozen object")
       fix = findings[3].autofix
       expect(fix.unsafe?).to be(false)
       expect(fix.replacement).to eq('(PREFIX + "_suffix").freeze')

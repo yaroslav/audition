@@ -402,12 +402,25 @@ module Audition
 
         # Ternaries classify as strings when both branches are;
         # `.freeze` binds tighter than `?:`, so they get parens.
+        # `X + "s"` is a String or a Pathname, whatever X is; only
+        # a string literal receiver pins the type.
         def call_type(call)
           case classifier.const_name(call.receiver)
           when "Regexp" then "Regexp"
           when "Object", "BasicObject" then "Object"
-          else "String"
+          else
+            if call.name == :+ && !string_receiver?(call)
+              "object"
+            else
+              "String"
+            end
           end
+        end
+
+        def string_receiver?(call)
+          receiver = call.receiver
+          receiver.is_a?(Prism::StringNode) ||
+            receiver.is_a?(Prism::InterpolatedStringNode)
         end
 
         def call_display(call)
