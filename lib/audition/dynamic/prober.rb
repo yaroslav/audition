@@ -152,8 +152,97 @@ module Audition
             findings: findings, passed: false)
         end
 
+        findings.concat(ractorize_findings(raw["ractorize"], entry))
         Result.new(mode: :rails, raw: raw, findings: findings,
           passed: own_clean?(findings))
+      end
+
+      # What happened once the booted application was frozen: no
+      # entry point on this Rails, the first object it could not
+      # share, a request that broke on the frozen graph, or one
+      # that only broke inside a worker.
+      def ractorize_findings(info, entry)
+        return [] unless info.is_a?(Hash)
+
+        environment = entry[:environment]
+        prefix = own_prefix(entry[:root])
+        unless info["available"]
+          return [Finding.new(
+            check: "dynamic-rails",
+            severity: :info,
+            message: "Rails #{info["rails"]} has no ractorize!; " \
+                     "the application graph was not frozen",
+            why: "Rails 8.2 adds Rails::Application#ractorize!, " \
+                 "which deep-freezes the application and " \
+                 "everything it reaches; a lazy memoization on " \
+                 "any object in that graph raises FrozenError " \
+                 "afterwards. Without it the probe can only " \
+                 "sweep constants and class-level state.",
+            fix: "Upgrade to Rails 8.2 so the probe can freeze " \
+                 "the application and serve a request through it.",
+            path: environment,
+            line: nil
+          )]
+        end
+
+        unless info["ok"]
+          site = failure_site(info, prefix: prefix)
+          return [Finding.new(
+            check: "dynamic-rails",
+            severity: :error,
+            message: "ractorize! failed: #{describe(info)}",
+            why: "Rails::Application#ractorize! deep-freezes the " \
+                 "application and everything it reaches (routes, " \
+                 "middleware, configuration); the object the " \
+                 "error names is the first one that cannot be " \
+                 "shared. #{RUNTIME_WHY}",
+            fix: "Make the named object shareable: freeze it, " \
+                 "drop the Proc, Mutex, or IO it holds, or keep " \
+                 "it per-Ractor; then re-run.",
+            path: site&.first || environment,
+            line: site&.last
+          )]
+        end
+
+        main = info["main_request"] || {}
+        unless main["ok"]
+          site = failure_site(main, prefix: prefix)
+          return [Finding.new(
+            check: "dynamic-rails",
+            severity: :error,
+            message: "GET / after ractorize! failed on the main " \
+                     "Ractor: #{describe(main)}",
+            why: "The application is frozen, so a lazy " \
+                 "memoization on any object the request touches " \
+                 "writes an instance variable on a frozen object " \
+                 "and raises FrozenError. #{RUNTIME_WHY}",
+            fix: "Compute the value eagerly in initialize, warm " \
+                 "it in a freeze override that calls the reader " \
+                 "before super, or drop the memo and recompute.",
+            path: site&.first || environment,
+            line: site&.last
+          )]
+        end
+
+        ractor = info["ractor_request"] || {}
+        return [] if ractor["ok"]
+
+        site = failure_site(ractor, prefix: prefix)
+        [Finding.new(
+          check: "dynamic-rails",
+          severity: :error,
+          message: "GET / inside a Ractor after ractorize! " \
+                   "failed: #{describe(ractor)}",
+          why: "Serving on the main Ractor after ractorize! " \
+               "worked; inside a worker the request touched " \
+               "state a non-main Ractor cannot reach. " \
+               "#{RUNTIME_WHY}",
+          fix: "Remove global and class-level state touched " \
+               "during request handling; keep per-Ractor state " \
+               "in Ractor.store_if_absent.",
+          path: site&.first || environment,
+          line: site&.last
+        )]
       end
 
       # A probe passes when the target's own surface is clean;
@@ -219,6 +308,24 @@ module Audition
         end
         raw.fetch("class_state", []).each do |entry|
           findings << class_state_finding(entry, label)
+        end
+        raw.fetch("unshareable_procs", []).each do |entry|
+          findings << runtime_finding(
+            entry, label,
+            check: "runtime-unshareable-proc",
+            severity: :warning,
+            message: "Rails could not make a callback block " \
+                     "Ractor-shareable: #{entry["proc"]}",
+            why: "With unshareable_proc_action set to :warn, " \
+                 "Rails ran Ractor.shareable_proc on this block " \
+                 "and it raised Ractor::IsolationError, so the " \
+                 "callback keeps an unshareable Proc; a non-main " \
+                 "Ractor running it raises. #{RUNTIME_WHY}",
+            fix: "Capture only shareable values: freeze the " \
+                 "local, inline it, or hoist a shareable leaf " \
+                 "such as a Symbol into a fresh local assigned " \
+                 "once before the block."
+          )
         end
         raw.fetch("class_variables", []).each do |entry|
           findings << runtime_finding(

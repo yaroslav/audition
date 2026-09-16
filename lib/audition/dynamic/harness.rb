@@ -629,17 +629,26 @@ module AuditionHarness
   # it could reach alongside the boot error.
   def rails(payload)
     environment = payload.fetch("environment")
+    root = payload["root"]
     bundler_setup
+    # The post-freeze requests need it; loaded before the snapshot
+    # so the sweep never attributes it to the target.
+    require "stringio" # audition:disable runtime-require
     baseline = module_state_snapshot
     before = Object.constants
     features = $LOADED_FEATURES.dup # audition:disable global-variables
     started = Time.now
     boot_error = nil
+    proc_warnings = []
+    armed = arm_proc_gate(proc_warnings, preload: true)
     begin
       # Absolute requires keep the path as given; realpathing it
       # keeps own-vs-dependency attribution honest under symlinked
       # roots (macOS /var).
       require realpath(environment) # audition:disable runtime-require
+      # Boot may have replaced the deprecation behavior, and an
+      # app that only defines the shim during boot is armed here.
+      arm_proc_gate(proc_warnings, preload: false) || armed
       begin
         Rails.application.eager_load!
       rescue Exception
@@ -654,17 +663,114 @@ module AuditionHarness
       else
         {"ok" => true, "seconds" => (Time.now - started).round(1)}
       end
+    # Freezing first lets the sweep see warmed state as shareable.
+    ractorize = boot_error ? nil : ractorize_application
     merge_reopened(
-      scan(Object.constants - before, root: payload["root"],
+      scan(Object.constants - before, root: root,
         limit: payload["max_constants"]), baseline
     ).merge(
       "boot" => boot,
+      "ractorize" => ractorize,
+      "unshareable_procs" => unshareable_procs(proc_warnings, root),
       "native_extensions" => native_extensions(
-        features, payload["root"], payload["known_compiled"]
+        features, root, payload["known_compiled"]
       )
     )
   rescue Exception => e
     {"boot" => {"ok" => false, "error" => describe_error(e)}}
+  end
+
+  # Rails 8.2 tries to make every callback block shareable once
+  # unshareable_proc_action is set, and reports each one it
+  # cannot as a deprecation naming the Proc. The probe arms :warn
+  # and collects those messages. Arming before boot covers apps
+  # that eager load while booting; the shim file only exists on
+  # 8.2, so older targets load nothing extra. Returns whether the
+  # gate is armed.
+  def arm_proc_gate(warnings, preload:)
+    if preload
+      begin
+        require "active_support/ractors" # audition:disable runtime-require
+        require "active_support" # audition:disable runtime-require
+      rescue LoadError
+        return false
+      end
+    end
+    return false unless defined?(ActiveSupport::Ractors) &&
+      ActiveSupport::Ractors.respond_to?(:unshareable_proc_action=)
+
+    ActiveSupport::Ractors.unshareable_proc_action = :warn
+    return true unless ActiveSupport.respond_to?(:deprecator)
+
+    deprecator = ActiveSupport.deprecator
+    collector = lambda do |message, _callstack|
+      warnings << message.to_s
+    end
+    deprecator.behavior = [collector]
+    deprecator.silenced = false if deprecator.respond_to?(:silenced=)
+    if deprecator.respond_to?(:disallowed_warnings=)
+      deprecator.disallowed_warnings = []
+    end
+    true
+  rescue Exception
+    false
+  end
+
+  # The deprecation names the Proc; its inspect carries the
+  # definition site, which is where the fix goes.
+  PROC_SITE = /#<Proc:0x\h+(?: \(lambda\))? (.+?):(\d+)>/
+
+  def unshareable_procs(warnings, root)
+    warnings.filter_map do |message|
+      next unless message.include?("Ractor shareable")
+
+      match = message.match(PROC_SITE)
+      path = match && match[1]
+      path = File.expand_path(path, root) if path && root &&
+        !path.start_with?("/")
+      shown = match ? match[0] : message.lines.last.to_s.strip
+      shown = shown.sub("#{root}/", "") if root
+      {"proc" => shown,
+       "path" => path,
+       "line" => match && Integer(match[2], 10),
+       "own" => path.nil? || own_path?(path, root)}
+    end
+  end
+
+  # Rails 8.2 adds Application#ractorize!, which deep-freezes the
+  # application graph. One GET / on the main Ractor afterwards
+  # surfaces lazy memoization on now-frozen objects (FrozenError),
+  # and one inside a Ractor surfaces state a worker cannot reach.
+  def ractorize_application
+    app = Rails.application
+    version = Rails.respond_to?(:version) ? Rails.version.to_s : nil
+    result = {"rails" => version}
+    return result.merge("available" => false) unless
+      app.respond_to?(:ractorize!)
+
+    result["available"] = true
+    begin
+      app.ractorize!
+    rescue Exception => e
+      return result.merge("ok" => false, "error" => describe_error(e))
+    end
+    result["ok"] = true
+    result["main_request"] = main_request(app)
+    if result["main_request"]["ok"]
+      result["ractor_request"] = in_ractor do
+        require "stringio" # audition:disable runtime-require
+        Rails.application.call(AuditionHarness.base_env).first
+      end
+    end
+    result
+  rescue Exception => e
+    {"available" => true, "ok" => false, "error" => describe_error(e)}
+  end
+
+  def main_request(app)
+    {"ok" => true, "status" => jsonable(app.call(base_env).first)}
+  rescue Exception => e
+    {"ok" => false, "error" => describe_error(e)}
   end
 
   # -- capabilities ------------------------------------------------

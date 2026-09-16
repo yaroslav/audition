@@ -506,6 +506,224 @@ RSpec.describe Audition::Dynamic::Prober do
     end
   end
 
+  describe "rails probing after boot" do
+    def fake_rails(dir, app_body, version: "8.2.0")
+      write(dir, "config/environment.rb", <<~RUBY)
+        module Rails
+          class App
+            #{app_body}
+          end
+
+          def self.application = (@application ||= App.new.freeze)
+
+          def self.version = #{version.inspect}
+        end
+      RUBY
+    end
+
+    it "arms the proc gate and reports blocks Rails cannot share" do
+      Dir.mktmpdir do |dir|
+        write(dir, "app/models/post.rb", "class Post; end\n")
+        environment = write(dir, "config/environment.rb", <<~RUBY)
+          module ActiveSupport
+            module Ractors
+              class << self
+                attr_accessor :unshareable_proc_action
+              end
+            end
+
+            class Deprecator
+              attr_reader :behavior
+
+              def behavior=(value)
+                @behavior = Array(value)
+              end
+
+              def silenced=(_value)
+              end
+
+              def warn(message)
+                behavior.each { |b| b.call(message, []) }
+              end
+            end
+
+            def self.deprecator = (@deprecator ||= Deprecator.new)
+          end
+
+          module Rails
+            class App
+              def eager_load!
+                action = ActiveSupport::Ractors.unshareable_proc_action
+                return unless action == :warn
+
+                ActiveSupport.deprecator.warn(<<~MSG)
+                  Rails attempted to make a Proc from your application
+                  Ractor shareable but a Ractor Isolation error was
+                  raised. The proc being returned is not Ractor safe.
+
+                  #<Proc:0x000000010 #{dir}/app/models/post.rb:3>
+                MSG
+                ActiveSupport.deprecator.warn("something else is deprecated")
+              end
+            end
+
+            def self.application = (@application ||= App.new.freeze)
+
+            def self.version = "8.2.0"
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :rails, environment: environment, root: dir
+        )
+
+        procs = result.findings.select do |f|
+          f.check == "runtime-unshareable-proc"
+        end
+        expect(procs.size).to eq(1)
+        expect(procs.first.severity).to eq(:warning)
+        expect(procs.first.message).to include("app/models/post.rb")
+        expect(procs.first.path).to end_with("app/models/post.rb")
+        expect(procs.first.line).to eq(3)
+        expect(procs.first.dependency?).to be(false)
+        expect(procs.first.fix).to include("freeze")
+      end
+    end
+
+    it "notes when the installed Rails has no ractorize!" do
+      Dir.mktmpdir do |dir|
+        environment = fake_rails(dir, <<~RUBY, version: "8.1.3")
+          def eager_load!
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :rails, environment: environment, root: dir
+        )
+
+        note = result.findings.find { |f| f.check == "dynamic-rails" }
+        expect(note.severity).to eq(:info)
+        expect(note.message).to include("ractorize!")
+        expect(note.message).to include("8.1.3")
+        expect(result.passed).to be(true)
+      end
+    end
+
+    it "reports the object ractorize! cannot share" do
+      Dir.mktmpdir do |dir|
+        environment = fake_rails(dir, <<~RUBY)
+          def eager_load!
+          end
+
+          def ractorize!
+            raise Ractor::IsolationError,
+              "can not make shareable object: #<Mutex:0x1>"
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :rails, environment: environment, root: dir
+        )
+
+        failure = result.findings.find { |f| f.check == "dynamic-rails" }
+        expect(failure.severity).to eq(:error)
+        expect(failure.message).to include("ractorize! failed")
+        expect(failure.message).to include("Mutex")
+        expect(failure.path).to end_with("config/environment.rb")
+        expect(failure.line).to eq(7)
+        expect(result.passed).to be(false)
+      end
+    end
+
+    it "serves a request after ractorize! and reports frozen memos" do
+      Dir.mktmpdir do |dir|
+        environment = fake_rails(dir, <<~RUBY)
+          def eager_load!
+          end
+
+          def ractorize!
+            Ractor.make_shareable(self)
+          end
+
+          def call(env)
+            @key ||= "activesupport_tagged_logging_tags"
+            [200, {}, ["ok"]]
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :rails, environment: environment, root: dir
+        )
+
+        failure = result.findings.find { |f| f.check == "dynamic-rails" }
+        expect(failure.severity).to eq(:error)
+        expect(failure.message).to include("after ractorize!")
+        expect(failure.message).to include("FrozenError")
+        expect(failure.line).to eq(11)
+        expect(failure.fix).to include("initialize")
+        expect(result.passed).to be(false)
+      end
+    end
+
+    it "serves a request inside a Ractor once the app is frozen" do
+      Dir.mktmpdir do |dir|
+        environment = fake_rails(dir, <<~RUBY)
+          def eager_load!
+          end
+
+          def ractorize!
+            Ractor.make_shareable(self)
+          end
+
+          def call(env)
+            [200, {}, [env["REQUEST_METHOD"]]]
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :rails, environment: environment, root: dir
+        )
+
+        expect(result.findings.select(&:error?)).to be_empty
+        expect(result.findings.map(&:check))
+          .not_to include("dynamic-rails")
+        expect(result.raw.dig("ractorize", "ok")).to be(true)
+        expect(result.raw.dig("ractorize", "ractor_request", "ok"))
+          .to be(true)
+        expect(result.passed).to be(true)
+      end
+    end
+
+    it "reports a request that only fails inside a Ractor" do
+      Dir.mktmpdir do |dir|
+        environment = fake_rails(dir, <<~RUBY)
+          def eager_load!
+          end
+
+          def ractorize!
+            Ractor.make_shareable(self)
+          end
+
+          def call(env)
+            $requests = ($requests || 0) + 1
+            [200, {}, ["ok"]]
+          end
+        RUBY
+
+        result = prober.probe(
+          mode: :rails, environment: environment, root: dir
+        )
+
+        failure = result.findings.find { |f| f.check == "dynamic-rails" }
+        expect(failure.severity).to eq(:error)
+        expect(failure.message).to include("inside a Ractor")
+        expect(failure.message).to include("IsolationError")
+        expect(failure.line).to eq(11)
+        expect(result.passed).to be(false)
+      end
+    end
+  end
+
   describe "rack probing" do
     it "boots, serves, and hammers the app across Ractors" do
       Dir.mktmpdir do |dir|
