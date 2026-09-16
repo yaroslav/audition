@@ -1,5 +1,53 @@
 # Changelog
 
+## [Unreleased]
+
+- Constants built from `Array#join` on an array literal, or on a
+  chain of array methods rooted in one
+  (`[MAJOR, MINOR, PRE].compact.join(".")`), from `Symbol#to_s`,
+  and from a unary-plus string are now mutable-constants errors
+  with a safe `.freeze` autofix, where they were unproven
+  warnings. `-"str"` and `:sym.name` classify as shareable. The
+  `[8, 2, 0].join(".")` version string is the canonical shape;
+  on the installed gem set it turns up in about twenty
+  constants.
+- Copy-on-write advice (`class_attribute`, class-level state,
+  registry mutation) now separates a plain `.freeze` for
+  shareable elements from `Ractor.make_shareable` for additions
+  that may be unfrozen, such as `Symbol#to_s` results; the old
+  recipe was a shallow freeze, the very shape the shallow-freeze
+  error reports.
+- The read-then-proxy memo, `@x || on_main(self) { @x ||= v }`,
+  is rated as the main-Ractor escape hatch it is: a warning, an
+  info note when the value is provably frozen, an error again
+  when a stray write sits beside it. The unsafe fixer no longer
+  edits inside the proxied block.
+- Two `ractor-isolation` rules for blocks that
+  `Ractor.shareable_proc` refuses: a block handed to
+  `shareable_proc` or `shareable_lambda` (error) or to a Rails
+  callback macro such as `before_create`, `validate`, `on_load`
+  or `initializer` (warning) that captures a local holding a
+  provably unshareable value (`prefix = +"Draft: "`, `[]`,
+  `String.new`) or a local assigned more than once. Captures of
+  unknown value stay silent; the boot gate below is their
+  detector.
+- The Rails probe arms `unshareable_proc_action = :warn` before
+  boot and again before eager loading, and reports each block
+  Rails could not share as `runtime-unshareable-proc` at the
+  Proc's definition site. On Rails 8.2 it then calls `ractorize!`,
+  serves one GET / on the main Ractor and one inside a Ractor,
+  and reports the first object that cannot be shared, a request
+  that broke on the frozen graph (a lazy memo raising
+  FrozenError), or one that only broke inside a worker, each
+  with the app-side line. Without `ractorize!` an info note
+  names the installed Rails.
+- Mutable-constant advice names the compatibility move for a
+  public constant applications mutate: keep the constant, read
+  it through an `initialize` keyword default into an ivar, and
+  deprecate mutating it.
+- README: `Ractor.make_shareable` wraps were listed under the
+  safe fix tier; they have always been unsafe-tier.
+
 ## [0.4.0] - 2026-09-15
 
 - Progress narration on stderr, stdout left pipeable:

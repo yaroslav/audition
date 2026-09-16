@@ -24,8 +24,10 @@ app can run on Ractor-parallel web servers such as [kino](https://github.com/yar
 3. **Dynamic probing** (`Audition::Dynamic`); a subprocess harness (JSON over stdout)
    that actually loads the target and interrogates it: runs scripts inside a Ractor,
    requires libraries and walks their namespaces checking `Ractor.shareable?` on every
-   constant plus class-level state, calls Rack apps inside a Ractor, and micro-probes
-   the running Ruby's Ractor capabilities.
+   constant plus class-level state, calls Rack apps inside a Ractor, boots Rails apps
+   with the proc gate armed and freezes them through `ractorize!` before serving a
+   request on the main Ractor and inside a worker, and micro-probes the running Ruby's
+   Ractor capabilities.
 
 Static finds latent hazards dynamic can't reach (code paths never executed during a
 probe); dynamic finds truth static can't see (metaprogramming, actual object graphs).
@@ -126,7 +128,8 @@ holding a hash of unfrozen arrays, and a shallow-frozen singleton.
 - `Audition::Static::WorkSplit`; worker count and largest-first work dealing.
 - `Audition::Dynamic::Harness`; standalone script run via `ruby harness.rb <mode>`,
   stdlib-only, one JSON document out. Modes: `script_main`, `script_ractor`,
-  `require` (namespace walk), `rack`, `capabilities`.
+  `require` (namespace walk), `rack`, `rails` (boot, proc gate, `ractorize!`, one
+  request on main and one in a Ractor), `capabilities`.
 - `Audition::Dynamic::Prober`; spawns the harness per mode with timeout, parses JSON,
   converts results to findings.
 - `Audition::Fixer` / `Audition::Rewriters`; safe inline autofixes attached to

@@ -89,6 +89,19 @@ call the memoizing methods once at boot, before spawning
 Ractors; the end of the gem's main file or an on_load hook is
 the natural place.
 
+"Proxied to the main Ractor" is the `@x || on_main(self) { @x
+||= v }` escape hatch: accepted, serializing, and only safe when
+the memoized value is shareable; prefer deleting or warming the
+memo.
+
+On a Rails target, `runtime-unshareable-proc` names a callback
+block Rails could not make shareable, at the Proc's definition
+site; fix the capture (freeze the local, inline it, or hoist a
+Symbol). A `dynamic-rails` finding after `ractorize!` names the
+first object the freeze rejected, or the line where a request
+on the frozen app or inside a Ractor broke; without Rails 8.2
+an info note says the graph was not frozen.
+
 ## Native extensions (C, Rust, and Zig)
 
 Audition cannot read native code, but it reports the one

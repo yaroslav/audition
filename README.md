@@ -28,12 +28,13 @@ core itself is being ractorized; see the
   (which rule of the Ractor model it violates) and a `fix`
   (what to write instead).
 - **`--fix` like RuboCop, in two tiers.** Safe corrections:
-  `.freeze` on string constants, sentinels, and containers whose
-  elements are all shareable, `Ractor.make_shareable(...)` for
-  the remaining mutable and shallow-frozen containers and for
-  Proc constants, and
-  boot-time hoisting of method-body requires. `--fix-unsafe` adds
-  semantics-affecting rewrites: magic-comment insertion,
+  `.freeze` on string constants (literals as well as the strings
+  `Array#join` and `Symbol#to_s` build), sentinels, and containers
+  whose elements are all shareable, and boot-time hoisting of
+  method-body requires. `--fix-unsafe` adds semantics-affecting
+  rewrites: `Ractor.make_shareable(...)` for the remaining mutable
+  and shallow-frozen containers and for Proc constants,
+  magic-comment insertion,
   freeze-on-memoize for class-level memoization (both `@x ||=`
   and `return @x if defined?(@x)` idioms keep their caching, the
   memoized value becomes shareable, Rails-core style;
@@ -323,14 +324,18 @@ Static, with file:line precision:
 - **Class variables**, resolved on the rubydex graph.
 - **Class-level instance variables**, unified across the class
   body, `def self.`, and `class << self`, across files; the classic
-  `@cache ||= {}` and `return @x if defined?(@x)` memoizations.
+  `@cache ||= {}` and `return @x if defined?(@x)` memoizations. A
+  memo whose write is proxied to the main Ractor
+  (`@x || on_main(self) { @x ||= ... }`) is reported as that
+  escape hatch, not as a raw memo.
 - **Constants that are not deeply shareable**: bare mutable
   literals, interpolated strings, the subtle shallow freeze
   (`[[1], [2]].freeze` still raises; Audition explains why), and
   call results the magic comment never covers (`X.tr(":", "")`,
-  `Regexp.new`, `Regexp.union`, `format`), the shapes Rails fixed
-  last in its own ractorization. Honors `# frozen_string_literal:`
-  and `# shareable_constant_value:` magic comments.
+  `[8, 2, 0].join(".")`, `:sym.to_s`, `+"str"`, `Regexp.new`,
+  `Regexp.union`, `format`), the shapes Rails fixed last in its
+  own ractorization. Honors `# frozen_string_literal:` and
+  `# shareable_constant_value:` magic comments.
 - **Sync primitives and Procs in constants** (Mutex, Queue,
   lambdas), including `Hash.new { }` default procs, which stay
   unshareable even after `.freeze`.
@@ -341,7 +346,12 @@ Static, with file:line precision:
 - **Runtime require and autoload** (serializes all Ractors through
   the main-Ractor proxy).
 - **`Ractor.new` blocks capturing outer locals** (the ArgumentError
-  at creation time), resolved through Prism's exact scope depths.
+  at creation time), resolved through Prism's exact scope depths;
+  and **blocks that `Ractor.shareable_proc` would refuse**, handed
+  to it directly or to a Rails callback macro (`before_create`,
+  `validate`, `on_load`, ...), because a captured local holds a
+  provably unshareable value (`prefix = +"Draft: "`) or is
+  assigned more than once.
 - **Hostile or removed APIs**: `Ractor.yield`/`take` (gone in 4.0),
   ActiveSupport `cattr_*`/`mattr_*` class variables (with the
   `class_attribute` migration Rails itself made) and
@@ -384,8 +394,14 @@ Dynamic, on the live object graph:
   the per-worker model of Ractor web servers; then hammers it from
   4 Ractors x 25 requests to surface failures that only appear
   under concurrency.
-- Boots Rails (`config/environment.rb`), eager-loads, and sweeps
-  the application's namespaces.
+- Boots Rails (`config/environment.rb`) with
+  `unshareable_proc_action` armed, so every callback block Rails
+  cannot make shareable is reported at the Proc's definition site;
+  eager-loads; on Rails 8.2 calls `ractorize!` to freeze the
+  application graph, then serves one GET / on the main Ractor
+  (where a lazy memo on a now-frozen object raises FrozenError)
+  and one inside a Ractor; and sweeps the application's
+  namespaces. Without `ractorize!` an info note says so.
 
 ## Agent skill
 

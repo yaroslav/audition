@@ -903,3 +903,94 @@ should drop is a policy call. Also left alone: the gvar and memo
 rewriters still wrap literal containers in
 `Ractor.make_shareable`, where the constants check now writes
 `.freeze`.
+
+## Fifth pass: the how-to guide
+
+Studied 2026-09-16: "Ractor-age Rails: a how-to guide" on the
+Rails at Scale blog
+(https://railsatscale.com/2026-09-16-ractor-age-rails-a-how-to-guide/),
+the Shopify team's own write-up of the patterns above. Every code
+sample in the post was run through Audition, and every Ruby claim
+below was re-verified on Ruby 4.0.6. The post confirms the
+catalog and adds nothing new to it; what it exposed is where
+Audition's reading of the catalog was too shallow.
+
+### 30. Constants built from a call the magic comment never sees
+
+The post opens with `VERSION = [8, 2, 0].join(".")`, which is
+Rails' own version string shape, and which Rails fixed on main
+after the post. Verified: `Array#join`, `.compact.join`,
+`%w[].join`, `Symbol#to_s`, and `+"str"` all return unfrozen
+Strings, reading such a constant from a worker raises, and
+`-"str"` and `Symbol#name` return frozen ones. Pattern 14 had
+listed `.tr`, `Regexp.new` and `format`; Audition rated a joined
+array an unproven warning with no autofix. On the installed gem
+set the shape appears in about twenty constants, most of them
+version strings, some already frozen by their authors.
+
+### 31. Read-copy-update is deep
+
+The post's `attr_readonly` rewrite is
+`self._attr_readonly = Ractor.make_shareable(_attr_readonly |
+attributes.map(&:to_s))`, deep rather than `.freeze`, because
+`Symbol#to_s` returns unfrozen strings. Verified: the frozen
+union is not shareable, the deep version is. Pattern 2 recorded
+the `.freeze` form from `_flash_types`, where the elements are
+Symbols; the two are the same recipe at different element
+types. Audition's copy-on-write advice quoted the shallow form
+only, which contradicted its own shallow-freeze error.
+
+### 32. The on_main hatch is a shape, not a raw memo
+
+The post presents `@x || on_main(self) { @x ||= compute }` as
+the accepted last resort, with the cost stated: every worker
+waiting on main re-serializes, so keep it rare. Pattern 12 had
+the shape; Audition still reported it as the same hard error as
+the naked memo and its unsafe fixer edited inside the block. It
+is now rated as the hatch, a warning, or an info note when the
+memoized value is provably frozen.
+
+### 33. Provable captures
+
+`prefix = +"Draft: "` above `before_create { title.prepend(prefix) }`
+is the post's example of a callback Rails cannot make shareable.
+Verified: `Ractor.shareable_proc` refuses it naming the
+variable, accepts the frozen version, and refuses any captured
+local assigned more than once anywhere in its scope, before or
+after the block. Pattern 25 called this class invisible
+statically; that holds for captures of `app` or a reflection,
+whose value no scan can prove, and not for literals. Audition
+now flags the provable cases and leaves the rest to the boot
+gate, which the Rails probe now arms.
+
+### 34. Lazy memos only bite after the freeze
+
+The post's three memoization cures (delete, compute on `freeze`,
+compute in `initialize`) address instance objects that
+`Ractor.make_shareable(app)` reaches. Verified: the memo raises
+FrozenError on first use after the freeze, and the `freeze`
+override that calls the reader before `super` fixes it. No
+static rule fits (most objects are never frozen), and Audition's
+Rails probe never froze the application, so this whole class
+went unobserved. The probe now calls `ractorize!` where it
+exists and serves a request on the main Ractor and inside a
+worker afterwards.
+
+### 35. Public constants move behind keyword defaults
+
+`Rack::MethodOverride` keeps its two public constants, takes
+them as `initialize` keyword defaults stored in ivars, and
+deprecates mutating the constants; a deep share of the
+middleware then freezes the instance's copy. The compatibility
+sibling of pattern 8's proxy and pattern 23's ivar registry, now
+named in the mutable-constant advice.
+
+### What changed in Audition after the fifth pass
+
+Patterns 30 through 33 are checks and advice; 34 is the Rails
+probe's ractorize step; 35 is advice. The post also names
+RuboCop's new recursive mode for `Style/MutableConstant`, which
+checks nesting the literal sweep of pattern 1 could not. A side
+finding: the README listed `Ractor.make_shareable` wraps under
+the safe fix tier, where the code has always kept them unsafe.
+
